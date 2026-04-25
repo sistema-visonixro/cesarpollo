@@ -2131,44 +2131,49 @@ export async function sincronizarVentas(): Promise<{
 
             let sincronizado = false;
             let intentos = 0;
-            while (!sincronizado && intentos < 5) {
-              intentos++;
-              const nuevoNumero = await buscarSiguienteLibre();
-              if (!nuevoNumero) {
-                console.error("[ventas] No se pudo obtener número libre");
-                fallidas++;
-                break;
-              }
-              console.warn(
-                `⚠ [ventas] Número ${venta.factura} tomado. Auto-corrigiendo → ${nuevoNumero} (intento ${intentos})`,
-              );
-              const ventaCorregida = { ...ventaData, factura: nuevoNumero };
-              const { error: retryError } = await supabase
-                .from("ventas")
-                .insert([ventaCorregida]);
-              if (!retryError) {
-                await eliminarVentaLocal(venta.id!);
-                console.log(
-                  `✓ [ventas] Corregida: ${venta.factura} → ${nuevoNumero}`,
-                );
-                exitosas++;
-                sincronizado = true;
-              } else if (
-                retryError.code !== "23505" &&
-                (retryError as any).status !== 409
-              ) {
-                // Solo abortar si NO es conflicto de clave duplicada
-                console.error("[ventas] Error no recuperable:", retryError);
-                fallidas++;
-                break;
-              }
-              // Si sigue siendo conflicto 23505/409, el loop intenta de nuevo
-            }
-            if (!sincronizado && intentos >= 5) {
-              console.error(
-                `[ventas] Se agotaron los reintentos para ${venta.factura}`,
-              );
+            // Obtener número base una sola vez; luego incrementar en cada conflicto
+            const numeroBase = await buscarSiguienteLibre();
+            let numeroActual = numeroBase ? parseInt(numeroBase) : null;
+            if (numeroActual === null) {
+              console.error("[ventas] No se pudo obtener número libre");
               fallidas++;
+            } else {
+              while (!sincronizado && intentos < 10) {
+                intentos++;
+                const nuevoNumero = numeroActual.toString();
+                console.warn(
+                  `⚠ [ventas] Número ${venta.factura} tomado. Auto-corrigiendo → ${nuevoNumero} (intento ${intentos})`,
+                );
+                const ventaCorregida = { ...ventaData, factura: nuevoNumero };
+                const { error: retryError } = await supabase
+                  .from("ventas")
+                  .insert([ventaCorregida]);
+                if (!retryError) {
+                  await eliminarVentaLocal(venta.id!);
+                  console.log(
+                    `✓ [ventas] Corregida: ${venta.factura} → ${nuevoNumero}`,
+                  );
+                  exitosas++;
+                  sincronizado = true;
+                } else if (
+                  retryError.code === "23505" ||
+                  (retryError as any).status === 409
+                ) {
+                  // Número tomado → incrementar y reintentar
+                  numeroActual++;
+                } else {
+                  // Error no recuperable
+                  console.error("[ventas] Error no recuperable:", retryError);
+                  fallidas++;
+                  break;
+                }
+              }
+              if (!sincronizado && intentos >= 10) {
+                console.error(
+                  `[ventas] Se agotaron los reintentos para ${venta.factura}`,
+                );
+                fallidas++;
+              }
             }
           }
         } else {
