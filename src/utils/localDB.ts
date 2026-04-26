@@ -4,6 +4,7 @@
  */
 
 import { supabase } from "../supabaseClient";
+import { compareTurnoRecordsByRecency } from "./fechas";
 
 // ─────────────────────────── Configuración DB ──────────────────────────────
 const DB_NAME = "CarnitasRoaLocalDB";
@@ -556,7 +557,9 @@ export async function sincronizarTodoDesdeSupabase(
       // Preservar registros con id negativo (pendientes offline, aún no subidos a Supabase)
       const existentes = await getAll<any>(store);
       const pendientesOffline = existentes.filter(
-        (r) => typeof r.id === "number" && r.id < 0,
+        (r) =>
+          (typeof r.id === "number" && r.id < 0) ||
+          r.pending_sync === true,
       );
       await clearStore(store);
       await upsertBulk(store, data ?? []);
@@ -675,7 +678,7 @@ export async function getAperturaActiva(
     .filter((c) => c.estado === "APERTURA")
     .sort(
       (a, b) =>
-        new Date(b.fecha ?? 0).getTime() - new Date(a.fecha ?? 0).getTime(),
+        compareTurnoRecordsByRecency(a, b),
     );
   if (aperturasIDB[0]) return aperturasIDB[0];
 

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { supabase } from "./supabaseClient";
-import { formatToHondurasLocal } from "./utils/fechas";
+import { formatToHondurasLocal, compareTurnoRecordsByRecency } from "./utils/fechas";
 import { useDatosNegocio } from "./useDatosNegocio";
 import {
   calcularResumenTurno,
@@ -387,8 +387,7 @@ export default function RegistroCierreView({
               )
               .sort(
                 (a: any, b: any) =>
-                  new Date(b.fecha ?? 0).getTime() -
-                  new Date(a.fecha ?? 0).getTime(),
+                  compareTurnoRecordsByRecency(a, b),
               )[0] ?? null;
         }
 
@@ -441,7 +440,7 @@ export default function RegistroCierreView({
             .eq("cajero_id", usuarioActual?.id)
             .eq("caja", caja)
             .eq("estado", "APERTURA")
-            .order("fecha", { ascending: false })
+            .order("id", { ascending: false })
             .limit(1)
             .maybeSingle();
 
