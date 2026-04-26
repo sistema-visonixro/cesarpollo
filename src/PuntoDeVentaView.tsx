@@ -3066,6 +3066,7 @@ export default function PuntoDeVentaView({
             caja: cajaAsignada,
             fecha: fechaLocal,
             estado: "APERTURA",
+            pending_sync: true,
           });
           console.log(
             "✓ Apertura offline guardada en STORE.CIERRES (id:",

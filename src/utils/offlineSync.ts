@@ -1273,6 +1273,83 @@ export async function obtenerCierresPendientesSync(): Promise<any[]> {
   }
 }
 
+export async function obtenerAperturasPendientesSync(): Promise<any[]> {
+  try {
+    const todos = await getAll<any>(STORE.CIERRES);
+    return todos.filter(
+      (c) => c?.estado === "APERTURA" && c?.pending_sync === true,
+    );
+  } catch (e) {
+    console.error("[aperturas] Error obteniendo aperturas pendientes:", e);
+    return [];
+  }
+}
+
+export async function sincronizarAperturasPendientes(): Promise<{
+  exitosos: number;
+  fallidos: number;
+}> {
+  const pendientes = await obtenerAperturasPendientesSync();
+  if (pendientes.length === 0) return { exitosos: 0, fallidos: 0 };
+
+  let exitosos = 0;
+  let fallidos = 0;
+
+  for (const apertura of pendientes) {
+    const payload = {
+      tipo_registro: "apertura",
+      cajero: apertura.cajero ?? "",
+      cajero_id: apertura.cajero_id ?? null,
+      caja: apertura.caja ?? "",
+      fecha: apertura.fecha,
+      fondo_fijo_registrado: Number(apertura.fondo_fijo_registrado ?? 0),
+      fondo_fijo: Number(apertura.fondo_fijo ?? 0),
+      efectivo_registrado: Number(apertura.efectivo_registrado ?? 0),
+      efectivo_dia: Number(apertura.efectivo_dia ?? 0),
+      monto_tarjeta_registrado: Number(apertura.monto_tarjeta_registrado ?? 0),
+      monto_tarjeta_dia: Number(apertura.monto_tarjeta_dia ?? 0),
+      transferencias_registradas: Number(apertura.transferencias_registradas ?? 0),
+      transferencias_dia: Number(apertura.transferencias_dia ?? 0),
+      dolares_registrado: Number(apertura.dolares_registrado ?? 0),
+      dolares_dia: Number(apertura.dolares_dia ?? 0),
+      diferencia: Number(apertura.diferencia ?? 0),
+      observacion: apertura.observacion ?? "",
+      estado: "APERTURA",
+    };
+
+    try {
+      // Apertura offline → siempre insertar (id negativo o string)
+      const { data: insData, error: insErr } = await supabase
+        .from("cierres")
+        .insert([payload])
+        .select("id")
+        .single();
+
+      if (insErr) throw insErr;
+      const syncedId = insData?.id;
+      if (!syncedId) throw new Error("No se obtuvo id de apertura insertada");
+
+      // Borrar el registro temporal con id negativo/string y guardar con id real
+      try { await deleteById(STORE.CIERRES, apertura.id); } catch { /* ignore */ }
+      await upsertOne(STORE.CIERRES, {
+        ...apertura,
+        id: syncedId,
+        tipo_registro: "apertura",
+        estado: "APERTURA",
+        pending_sync: false,
+      });
+
+      console.log(`[aperturas] Apertura sincronizada OK (id Supabase: ${syncedId})`);
+      exitosos++;
+    } catch (error) {
+      console.error("[aperturas] Error sincronizando apertura pendiente:", error);
+      fallidos++;
+    }
+  }
+
+  return { exitosos, fallidos };
+}
+
 export async function sincronizarCierresPendientes(): Promise<{
   exitosos: number;
   fallidos: number;
@@ -1391,13 +1468,15 @@ export async function sincronizarTodo(): Promise<{
     const pagos = await sincronizarPagos(); // legado
     await sincronizarPagosF(); // abonos crédito
     const ventasResult = await sincronizarVentas(); // nueva tabla ventas
+    const aperturasResult = await sincronizarAperturasPendientes();
     const cierresResult = await sincronizarCierresPendientes();
     const gastos = await sincronizarGastos();
     const envios = await sincronizarEnvios();
 
     console.log(
       `[sync] Completa: ${facturas.exitosas} facturas (legado), ${pagos.exitosos} pagos (legado), ` +
-        `${ventasResult.exitosas} ventas, ${cierresResult.exitosos} cierres, ${gastos.exitosos} gastos, ${envios.exitosos} envíos.`,
+        `${ventasResult.exitosas} ventas, ${aperturasResult.exitosos} aperturas, ${cierresResult.exitosos} cierres, ${gastos.exitosos} gastos, ${envios.exitosos} envíos.`,
+
     );
 
     return { facturas, pagos, gastos, envios };
@@ -1423,6 +1502,7 @@ export async function obtenerContadorPendientes(): Promise<{
   const envios = await obtenerEnviosPendientes();
   const ventas = await obtenerVentasPendientes();
   const cierres = await obtenerCierresPendientesSync();
+  const aperturas = await obtenerAperturasPendientesSync();
 
   return {
     facturas: facturas.length,
@@ -1430,7 +1510,7 @@ export async function obtenerContadorPendientes(): Promise<{
     gastos: gastos.length,
     envios: envios.length,
     ventas: ventas.length,
-    cierres: cierres.length,
+    cierres: cierres.length + aperturas.length,
   };
 }
 
