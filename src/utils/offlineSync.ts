@@ -8,7 +8,7 @@ import { upsertOne, getByIndex, STORE } from "./localDB";
 
 // Nombre de la base de datos
 const DB_NAME = "PuntoVentaOfflineDB";
-const DB_VERSION = 7; // v7: bump para sincronizar con versión existente en navegador
+const DB_VERSION = 8; // v8: cache CAI separado por cajero + tipo_comprobante
 
 // Nombres de las tablas (stores)
 const FACTURAS_STORE = "facturas_pendientes";
@@ -19,7 +19,7 @@ const GASTOS_STORE = "gastos_pendientes";
 const ENVIOS_STORE = "envios_pendientes";
 const PRODUCTOS_STORE = "productos_cache"; // Cache de productos
 const APERTURA_STORE = "apertura_cache"; // Cache de apertura de caja
-const CAI_STORE = "cai_cache"; // Cache de información CAI (key = cajero_id)
+const CAI_STORE = "cai_cache"; // Cache de información CAI (key = cajero_id + tipo)
 const DATOS_NEGOCIO_STORE = "datos_negocio_cache"; // Cache de datos del negocio
 
 // Tipos
@@ -191,9 +191,13 @@ export interface AperturaCache {
   timestamp: number;
 }
 
+export type TipoComprobanteFiscal = "FACTURA" | "RECIBO";
+
 export interface CaiCache {
+  cache_key: string;
   id: string;
   cajero_id: string;
+  tipo_comprobante: TipoComprobanteFiscal;
   caja_asignada: string;
   cai: string;
   factura_desde: string;
@@ -216,6 +220,13 @@ export interface DatosNegocioCache {
 
 // Variable global para la conexión DB
 let db: IDBDatabase | null = null;
+
+function buildCaiCacheKey(
+  cajeroId: string,
+  tipoComprobante: TipoComprobanteFiscal,
+): string {
+  return `${cajeroId}::${tipoComprobante}`;
+}
 
 /**
  * Inicializa la base de datos IndexedDB
@@ -304,15 +315,15 @@ export async function initIndexedDB(): Promise<IDBDatabase> {
         console.log("Store de apertura cache creado");
       }
 
-      // ── Cache de CAI (v6: keyPath = cajero_id para aislar por usuario)
-      // Si existe con el esquema anterior (keyPath=id), recrear.
+      // ── Cache de CAI (v8: keyPath = cajero_id + tipo_comprobante)
+      // Recrear si existe con un esquema anterior.
       if (database.objectStoreNames.contains(CAI_STORE)) {
         try {
-          // Intentar leer la keyPath; si es 'id' (viejo), eliminar y recrear
+          // Intentar leer la keyPath; si no es cache_key, eliminar y recrear.
           const oldStore = (
             event.target as IDBOpenDBRequest
           ).transaction!.objectStore(CAI_STORE);
-          if (oldStore.keyPath === "id") {
+          if (oldStore.keyPath !== "cache_key") {
             database.deleteObjectStore(CAI_STORE);
           }
         } catch {
@@ -320,10 +331,14 @@ export async function initIndexedDB(): Promise<IDBDatabase> {
         }
       }
       if (!database.objectStoreNames.contains(CAI_STORE)) {
-        database.createObjectStore(CAI_STORE, {
-          keyPath: "cajero_id", // 🔑 uno por cajero
+        const caiStore = database.createObjectStore(CAI_STORE, {
+          keyPath: "cache_key",
         });
-        console.log("Store de CAI cache creado (v6, por cajero_id)");
+        caiStore.createIndex("cajero_id", "cajero_id", { unique: false });
+        caiStore.createIndex("tipo_comprobante", "tipo_comprobante", {
+          unique: false,
+        });
+        console.log("Store de CAI cache creado (v8, por cajero + tipo)");
       }
 
       // Crear store para cache de datos del negocio
@@ -716,7 +731,8 @@ export async function sincronizarFacturas(): Promise<{
                 await supabase
                   .from("cai_facturas")
                   .update({ factura_actual: siguienteNum })
-                  .eq("cajero_id", factura.cajero_id);
+                  .eq("cajero_id", factura.cajero_id)
+                  .eq("tipo_comprobante", "RECIBO");
 
                 // 2. Corregir factura_venta en pagos ya en Supabase
                 //    (pueden haberse sincronizado antes que la factura)
@@ -1875,7 +1891,7 @@ export async function sincronizarAperturaPendiente(): Promise<boolean> {
  * Esto evita que dos usuarios en el mismo dispositivo se sobreescriban.
  */
 export async function guardarCaiCache(
-  cai: Omit<CaiCache, "timestamp">,
+  cai: Omit<CaiCache, "timestamp" | "cache_key">,
 ): Promise<void> {
   const database = await initIndexedDB();
 
@@ -1885,10 +1901,11 @@ export async function guardarCaiCache(
 
     const caiConTimestamp: CaiCache = {
       ...cai,
+      cache_key: buildCaiCacheKey(cai.cajero_id, cai.tipo_comprobante),
       timestamp: Date.now(),
     };
 
-    // put() upserta: si existe la clave (cajero_id) la actualiza, si no la crea
+    // put() upserta: si existe la clave (cajero_id + tipo) la actualiza.
     const request = store.put(caiConTimestamp);
 
     request.onsuccess = () => {
@@ -1910,26 +1927,38 @@ export async function guardarCaiCache(
  */
 export async function obtenerCaiCache(
   cajeroId?: string,
+  tipoComprobante?: TipoComprobanteFiscal,
 ): Promise<CaiCache | null> {
   const database = await initIndexedDB();
+
+  const seleccionarCai = (cais: CaiCache[]): CaiCache | null => {
+    if (tipoComprobante) {
+      return cais.find((c) => c.tipo_comprobante === tipoComprobante) ?? null;
+    }
+
+    return cais.find((c) => c.tipo_comprobante === "RECIBO") ?? cais[0] ?? null;
+  };
 
   return new Promise((resolve, reject) => {
     const transaction = database.transaction([CAI_STORE], "readonly");
     const store = transaction.objectStore(CAI_STORE);
 
-    if (cajeroId) {
-      // Buscar entrada exacta por cajero_id
-      const request = store.get(cajeroId);
+    if (cajeroId && tipoComprobante) {
+      const request = store.get(buildCaiCacheKey(cajeroId, tipoComprobante));
       request.onsuccess = () => {
         resolve((request.result as CaiCache) ?? null);
       };
       request.onerror = () => reject(request.error);
+    } else if (cajeroId) {
+      const request = store.index("cajero_id").getAll(cajeroId);
+      request.onsuccess = () => {
+        resolve(seleccionarCai((request.result as CaiCache[]) ?? []));
+      };
+      request.onerror = () => reject(request.error);
     } else {
-      // Compatibilidad: devolver el primero disponible
       const request = store.getAll();
       request.onsuccess = () => {
-        const cais = request.result as CaiCache[];
-        resolve(cais.length > 0 ? cais[0] : null);
+        resolve(seleccionarCai((request.result as CaiCache[]) ?? []));
       };
       request.onerror = () => {
         console.error("Error obteniendo CAI desde cache:", request.error);
@@ -2183,7 +2212,8 @@ export async function sincronizarVentas(): Promise<{
                   await supabase
                     .from("cai_facturas")
                     .update({ factura_actual: (maxNum + 2).toString() })
-                    .eq("cajero_id", cajeroId);
+                    .eq("cajero_id", cajeroId)
+                    .eq("tipo_comprobante", "RECIBO");
                   return (maxNum + 1).toString();
                 }
               } catch {

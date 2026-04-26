@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
 import { getLocalDayRange } from "./utils/fechas";
 import { supabase } from "./supabaseClient";
+import {
+  calcularResumenTurno,
+  getAll,
+  getByIndex,
+  getPrecioDolarLocal,
+  listarResumenesTurnos,
+  STORE,
+} from "./utils/localDB";
 
 import { useDatosNegocio } from "./useDatosNegocio";
 
@@ -92,13 +100,11 @@ export default function ResultadosView({
   async function fetchTurnosResumen() {
     setTurnosLoading(true);
     try {
-      const { data } = await supabase
-        .from("v_resumen_turnos")
-        .select("*")
-        .limit(20);
-      setTurnosResumen(data || []);
+      const resumenes = await listarResumenesTurnos();
+      setTurnosResumen(resumenes.slice(0, 20));
     } catch (e) {
-      console.warn("v_resumen_turnos no disponible:", e);
+      console.warn("No se pudo recalcular resumen de turnos desde IDB:", e);
+      setTurnosResumen([]);
     } finally {
       setTurnosLoading(false);
     }
@@ -120,17 +126,17 @@ export default function ResultadosView({
     setResumenAdminLoading(true);
     setResumenAdminStep("data");
     try {
-      // Buscar la última apertura del cajero seleccionado
-      const { data: cierreData } = await supabase
-        .from("cierres")
-        .select("fecha, caja")
-        .eq("cajero_id", cajeroId)
-        .eq("estado", "APERTURA")
-        .order("fecha", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      const cierresIdb = await getAll<any>(STORE.CIERRES);
+      const aperturaLocal =
+        cierresIdb
+          .filter((c) => c.cajero_id === cajeroId && c.estado === "APERTURA")
+          .sort(
+            (a, b) =>
+              new Date(b.fecha ?? 0).getTime() -
+              new Date(a.fecha ?? 0).getTime(),
+          )[0] ?? null;
 
-      if (!cierreData) {
+      if (!aperturaLocal) {
         setResumenAdminLoading(false);
         setResumenAdminData({
           efectivo: 0,
@@ -145,145 +151,53 @@ export default function ResultadosView({
         return;
       }
 
-      const start = cierreData.fecha;
-      const cajaAsignada = cierreData.caja;
-      const { end: dayEnd } = getLocalDayRange();
+      const resumenTurno = await calcularResumenTurno(
+        Number(aperturaLocal.id),
+        cajeroId,
+      );
 
-      const [{ data: pagosfDia }, { data: gastosDia }] = await Promise.all([
-        supabase
-          .from("ventas")
-          .select(
-            "efectivo, tarjeta, transferencia, dolares, dolares_usd, delivery, cambio, cajero_id, fecha_hora",
-          )
-          .eq("cajero_id", cajeroId)
-          .neq("tipo", "CREDITO")
-          .gte("fecha_hora", start)
-          .lte("fecha_hora", dayEnd),
-        supabase
-          .from("gastos")
-          .select("monto")
-          .eq("cajero_id", cajeroId)
-          .eq("caja", cajaAsignada)
-          .gte("fecha_hora", start)
-          .lte("fecha_hora", dayEnd),
-      ]);
+      if (!resumenTurno) {
+        throw new Error("No se pudo recalcular el resumen del turno en IDB");
+      }
 
-      const pagosfRows = pagosfDia || [];
+      const tsInicio = new Date(resumenTurno.fecha_apertura ?? 0).getTime();
+      const tsFin = resumenTurno.fecha_cierre
+        ? new Date(resumenTurno.fecha_cierre).getTime()
+        : Date.now();
 
-      // Acumuladores por método de pago
-      let efectivoSumBruto = 0;
-      let tarjetaSum = 0;
-      let transSum = 0;
-      let dolaresSum = 0;
-      let dolaresSumUsd = 0;
-      let cambioSum = 0;
+      const ventasIdb = await getByIndex<any>(STORE.VENTAS, "cajero_id", cajeroId);
       let deliverySum = 0;
-
-      // Distribuir delivery al método de pago principal de cada factura.
-      for (const r of pagosfRows) {
-        const ef = parseFloat(r.efectivo || 0);
-        const tk = parseFloat(r.tarjeta || 0);
-        const tr = parseFloat(r.transferencia || 0);
-        const dl = parseFloat(r.dolares || 0);
-        const dlU = parseFloat(r.dolares_usd || 0);
-        const cb = parseFloat(r.cambio || 0);
-        const dv = parseFloat(r.delivery || 0);
-
-        dolaresSum += dl;
-        dolaresSumUsd += dlU;
-        cambioSum += cb;
-        deliverySum += dv;
-
-        if (ef > 0 || (tk === 0 && tr === 0 && dl === 0)) {
-          efectivoSumBruto += ef + dv;
-          tarjetaSum += tk;
-          transSum += tr;
-        } else if (tk > 0) {
-          efectivoSumBruto += ef;
-          tarjetaSum += tk + dv;
-          transSum += tr;
-        } else if (tr > 0) {
-          efectivoSumBruto += ef;
-          tarjetaSum += tk;
-          transSum += tr + dv;
-        } else {
-          efectivoSumBruto += ef + dv;
-          tarjetaSum += tk;
-          transSum += tr;
+      for (const venta of ventasIdb) {
+        const ts = new Date(venta.fecha_hora ?? 0).getTime();
+        if (ts >= tsInicio && ts < tsFin && venta.tipo !== "CREDITO") {
+          deliverySum += parseFloat(venta.delivery || 0);
         }
       }
 
-      // Efectivo neto = bruto (delivery incluido) − cambio
-      const efectivoSum = Number((efectivoSumBruto - cambioSum).toFixed(2));
-
-      let tasa = 0;
-      try {
-        const { data: tasaData } = await supabase
-          .from("precio_dolar")
-          .select("valor")
-          .eq("id", "singleton")
-          .limit(1)
-          .single();
-        if (tasaData) tasa = Number(tasaData.valor) || 0;
-      } catch (_) {}
-
-      const dolaresConvertidos = Number((dolaresSumUsd * tasa).toFixed(2));
-      const gastosSum = (gastosDia || []).reduce(
-        (s: number, g: any) => s + parseFloat(g.monto || 0),
-        0,
+      const tasa = await getPrecioDolarLocal();
+      const dolaresConvertidos = Number(
+        (resumenTurno.dolares_usd * tasa).toFixed(2),
       );
 
-      // Contar platillos y bebidas del turno (excluyendo donaciones)
-      let platillosSum = 0;
-      let bebidasSum = 0;
-      let platillosDonados = 0;
-      let bebidasDonadas = 0;
-      try {
-        const { data: facturasResumen } = await supabase
-          .from("ventas")
-          .select("productos, es_donacion")
-          .eq("cajero_id", cajeroId)
-          .gte("fecha_hora", start)
-          .lte("fecha_hora", dayEnd);
-        if (facturasResumen) {
-          for (const fac of facturasResumen) {
-            try {
-              const items =
-                typeof fac.productos === "string"
-                  ? JSON.parse(fac.productos)
-                  : fac.productos;
-              if (Array.isArray(items)) {
-                for (const item of items) {
-                  const qty = parseFloat(item.cantidad || 1);
-                  if (fac.es_donacion) {
-                    if (item.tipo === "comida") platillosDonados += qty;
-                    else if (item.tipo === "bebida") bebidasDonadas += qty;
-                  } else {
-                    if (item.tipo === "comida") platillosSum += qty;
-                    else if (item.tipo === "bebida") bebidasSum += qty;
-                  }
-                }
-              }
-            } catch (_) {}
-          }
-        }
-      } catch (_) {}
-
       setResumenAdminData({
-        efectivo: efectivoSum,
-        tarjeta: tarjetaSum,
-        transferencia: transSum,
-        dolares: dolaresSum,
-        dolares_usd: dolaresSumUsd,
+        efectivo: Number(
+          (resumenTurno.efectivo_bruto - resumenTurno.cambio_devuelto).toFixed(
+            2,
+          ),
+        ),
+        tarjeta: resumenTurno.tarjeta,
+        transferencia: resumenTurno.transferencia,
+        dolares: resumenTurno.dolares_lps,
+        dolares_usd: resumenTurno.dolares_usd,
         dolares_convertidos: dolaresConvertidos,
         tasa_dolar: tasa,
-        gastos: gastosSum,
-        cambio: cambioSum,
+        gastos: resumenTurno.gastos,
+        cambio: resumenTurno.cambio_devuelto,
         delivery: deliverySum,
-        platillos: Math.round(platillosSum),
-        bebidas: Math.round(bebidasSum),
-        platillos_donados: Math.round(platillosDonados),
-        bebidas_donadas: Math.round(bebidasDonadas),
+        platillos: Math.round(resumenTurno.platillos_vendidos),
+        bebidas: Math.round(resumenTurno.bebidas_vendidas),
+        platillos_donados: Math.round(resumenTurno.platillos_donados),
+        bebidas_donadas: Math.round(resumenTurno.bebidas_donadas),
       });
     } catch (err) {
       console.error("Error al obtener resumen admin:", err);

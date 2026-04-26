@@ -283,7 +283,7 @@ export default function PuntoDeVentaView({
           .select("rango_desde")
           .eq("cajero_id", usuarioActual?.id ?? "")
           .eq("activo", true)
-          .order("tipo_comprobante", { ascending: false }) // RECIBO antes que FACTURA (R > F alfabético)
+          .eq("tipo_comprobante", TIPO_RECIBO)
           .limit(1)
           .maybeSingle();
         if (caiRow?.rango_desde) return String(caiRow.rango_desde);
@@ -482,51 +482,15 @@ export default function PuntoDeVentaView({
       const numUsado = parseInt(factura_numero);
       if (Number.isFinite(numUsado)) {
         const nuevaFactura = (numUsado + 1).toString();
-        setFacturaActual(nuevaFactura);
-
-        if (usuarioActual?.id) {
-          try {
-            await supabase
-              .from("cai_facturas")
-              .update({ factura_actual: nuevaFactura })
-              .eq("cajero_id", usuarioActual.id)
-              .eq("tipo_comprobante", "RECIBO");
-          } catch (err) {
-            console.error(
-              "Error actualizando factura_actual tras venta a crédito:",
-              err,
-            );
-          }
-        }
-
         try {
-          const caiCache = await obtenerCaiCache(usuarioActual?.id);
-          if (caiCache) {
-            await guardarCaiCache({
-              ...caiCache,
-              factura_actual: nuevaFactura,
-            });
-          }
-        } catch {
-          /* non-critical */
-        }
-
-        // Actualizar STORE.CAI_FACTURAS en IDB (fuente primaria offline)
-        try {
-          const caiRows = await getAll<any>(STORE.CAI_FACTURAS);
-          const caiRec = caiRows.find(
-            (r) =>
-              r.cajero_id === usuarioActual?.id &&
-              r.tipo_comprobante === "RECIBO",
+          await persistirReciboActual(nuevaFactura, {
+            actualizarSupabase: Boolean(usuarioActual?.id),
+          });
+        } catch (err) {
+          console.error(
+            "Error actualizando factura_actual tras venta a crédito:",
+            err,
           );
-          if (caiRec) {
-            await upsertOne(STORE.CAI_FACTURAS, {
-              ...caiRec,
-              factura_actual: nuevaFactura,
-            });
-          }
-        } catch {
-          /* non-critical */
         }
       }
 
@@ -641,254 +605,14 @@ export default function PuntoDeVentaView({
           setResumenLoading(false);
           return;
         }
-        // aperturaIDB no encontrada → caer al bloque Supabase abajo
-      }
-
-      // ── MODO ONLINE: Supabase ─────────────────────────────────────────────
-      // Buscar la fecha de apertura del día actual para filtrar desde ese momento
-      const { end: dayEnd, day } = getLocalDayRange();
-
-      // Obtener caja asignada
-      let cajaAsignada = caiInfo?.caja_asignada;
-      if (!cajaAsignada) {
-        const { data: caiData } = await supabase
-          .from("cai_facturas")
-          .select("caja_asignada")
-          .eq("cajero_id", usuarioActual?.id)
-          .order("id", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        cajaAsignada = caiData?.caja_asignada || "";
-      }
-
-      // Buscar la última apertura (estado='APERTURA') sin importar el día
-      // Esta será la apertura del turno actual
-      const { data: aperturaActual } = await supabase
-        .from("cierres")
-        .select("fecha, estado")
-        .eq("cajero_id", usuarioActual?.id)
-        .eq("caja", cajaAsignada)
-        .eq("estado", "APERTURA")
-        .order("fecha", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      // Si no hay apertura registrada, mostrar advertencia y salir
-      if (!aperturaActual) {
         setResumenLoading(false);
         alert(
-          "No hay apertura de caja registrada. Por favor, registra primero una apertura.",
+          "No hay apertura de caja en IndexedDB. El resumen de caja se calcula solo desde datos locales.",
         );
         setShowResumen(false);
         return;
       }
 
-      // Usar la fecha EXACTA de apertura (con hora, minutos, segundos) como inicio
-      const start = aperturaActual.fecha;
-      const end = dayEnd;
-
-      console.log("Resumen de caja - Rango:", {
-        start,
-        end,
-        day,
-        cajeroId: usuarioActual?.id,
-        cajaAsignada,
-        usandoFechaApertura: !!aperturaActual,
-        fechaApertura: aperturaActual?.fecha,
-      });
-
-      const [{ data: pagosfDia }, { data: gastosDia }] = await Promise.all([
-        supabase
-          .from("ventas")
-          .select(
-            "efectivo, tarjeta, transferencia, dolares, dolares_usd, delivery, cambio, tipo, cajero_id, fecha_hora",
-          )
-          .eq("cajero_id", usuarioActual?.id)
-          .neq("tipo", "CREDITO")
-          .gte("fecha_hora", start)
-          .lte("fecha_hora", end),
-        // Obtener gastos: ahora usa fecha_hora (timestamp) para filtrar desde apertura exacta
-        (async () => {
-          if (!cajaAsignada) return Promise.resolve({ data: [] });
-          return supabase
-            .from("gastos")
-            .select("monto")
-            .gte("fecha_hora", start)
-            .lte("fecha_hora", end)
-            .eq("cajero_id", usuarioActual?.id)
-            .eq("caja", cajaAsignada);
-        })(),
-      ]);
-
-      // Contar platillos y bebidas del turno desde facturas
-      let platillosSum = 0;
-      let bebidasSum = 0;
-      try {
-        const { data: facturasResumen } = await supabase
-          .from("ventas")
-          .select("productos, factura, tipo")
-          .eq("cajero_id", usuarioActual?.id)
-          .or("es_donacion.is.null,es_donacion.eq.false")
-          .gte("fecha_hora", start)
-          .lte("fecha_hora", end);
-        if (facturasResumen && Array.isArray(facturasResumen)) {
-          const facturasVistas = new Set<string>();
-          for (const fac of facturasResumen) {
-            try {
-              const numFac = String(fac.factura || "");
-              const esDevolucion =
-                typeof fac.factura === "string" &&
-                fac.factura.startsWith("DEV-");
-              // Para devoluciones: siempre procesar (restan)
-              // Para ventas normales: saltar si ya se contó este número de factura
-              if (!esDevolucion) {
-                if (facturasVistas.has(numFac)) continue;
-                facturasVistas.add(numFac);
-              }
-              const items =
-                typeof fac.productos === "string"
-                  ? JSON.parse(fac.productos)
-                  : fac.productos;
-              if (Array.isArray(items)) {
-                for (const item of items) {
-                  const qty = parseFloat(item.cantidad || 1);
-                  if (item.tipo === "comida")
-                    platillosSum += esDevolucion ? -qty : qty;
-                  else if (item.tipo === "bebida")
-                    bebidasSum += esDevolucion ? -qty : qty;
-                }
-              }
-            } catch (_) {}
-          }
-        }
-      } catch (e) {
-        console.warn("No se pudieron contar platillos/bebidas:", e);
-      }
-
-      console.log("Resultados consultas pagosf:", {
-        rows: pagosfDia?.length,
-        data: pagosfDia,
-      });
-
-      const pagosfRows = pagosfDia || [];
-
-      // Acumuladores por método de pago
-      let efectivoSumBruto = 0;
-      let tarjetaSum = 0;
-      let transSum = 0;
-      let dolaresSum = 0;
-      let dolaresSumUsd = 0;
-      let cambioSum = 0;
-      let deliverySum = 0;
-
-      // Sumar cada método de pago directamente desde los campos de la DB.
-      // No redistribuir delivery — se muestra por separado para no distorsionar el efectivo.
-      for (const r of pagosfRows) {
-        const ef = parseFloat(r.efectivo || 0);
-        const tk = parseFloat(r.tarjeta || 0);
-        const tr = parseFloat(r.transferencia || 0);
-        const dl = parseFloat(r.dolares || 0);
-        const dlU = parseFloat(r.dolares_usd || 0);
-        const cb = parseFloat(r.cambio || 0);
-        const dv = parseFloat(r.delivery || 0);
-
-        efectivoSumBruto += ef;
-        tarjetaSum += tk;
-        transSum += tr;
-        dolaresSum += dl;
-        dolaresSumUsd += dlU;
-        // Sumar cambio de TODAS las filas (igual que la vista SQL).
-        // Las devoluciones nuevas tienen cambio=0, por lo que no afectan.
-        // Esto mantiene consistencia con v_resumen_turnos.
-        cambioSum += cb;
-        deliverySum += dv;
-      }
-
-      // Efectivo neto = bruto − cambio (delivery NO se incluye, sigue en su campo separado)
-      const efectivoSum = Number((efectivoSumBruto - cambioSum).toFixed(2));
-
-      // obtener tasa del dolar (singleton)
-      let tasa = 0;
-      try {
-        const { data: tasaData } = await supabase
-          .from("precio_dolar")
-          .select("valor")
-          .eq("id", "singleton")
-          .limit(1)
-          .single();
-        if (tasaData && typeof tasaData.valor !== "undefined") {
-          tasa = Number(tasaData.valor) || 0;
-        }
-      } catch (e) {
-        console.warn("No se pudo obtener tasa de precio_dolar:", e);
-      }
-
-      const dolaresConvertidos = Number((dolaresSumUsd * tasa).toFixed(2));
-
-      const gastosSum = (gastosDia || []).reduce(
-        (s: number, g: any) => s + parseFloat(g.monto || 0),
-        0,
-      );
-
-      // Contar platillos/bebidas donados en este turno
-      let platillosDonados = 0;
-      let bebidasDonadas = 0;
-      try {
-        const { data: facturaDonaciones } = await supabase
-          .from("ventas")
-          .select("productos")
-          .eq("cajero_id", usuarioActual?.id)
-          .eq("es_donacion", true)
-          .gte("fecha_hora", start)
-          .lte("fecha_hora", end);
-        if (facturaDonaciones && Array.isArray(facturaDonaciones)) {
-          for (const fac of facturaDonaciones) {
-            try {
-              const items =
-                typeof fac.productos === "string"
-                  ? JSON.parse(fac.productos)
-                  : fac.productos;
-              if (Array.isArray(items)) {
-                for (const item of items) {
-                  const qty = parseFloat(item.cantidad || 1);
-                  if (item.tipo === "comida") platillosDonados += qty;
-                  else if (item.tipo === "bebida") bebidasDonadas += qty;
-                }
-              }
-            } catch (_) {}
-          }
-        }
-      } catch (e) {
-        console.warn("No se pudieron contar donaciones:", e);
-      }
-
-      console.log("Sumas calculadas:", {
-        efectivo_bruto: efectivoSumBruto,
-        cambio: cambioSum,
-        efectivo_neto: efectivoSum,
-        tarjeta: tarjetaSum,
-        transferencia: transSum,
-        dolares: dolaresSum,
-        delivery: deliverySum,
-        gastos: gastosSum,
-      });
-
-      setResumenData({
-        efectivo: efectivoSum,
-        tarjeta: tarjetaSum,
-        transferencia: transSum,
-        dolares: dolaresSum,
-        dolares_usd: dolaresSumUsd,
-        dolares_convertidos: dolaresConvertidos,
-        tasa_dolar: tasa,
-        gastos: gastosSum,
-        cambio: cambioSum,
-        delivery: deliverySum,
-        platillos: platillosSum,
-        bebidas: bebidasSum,
-        platillos_donados: platillosDonados,
-        bebidas_donadas: bebidasDonadas,
-      });
     } catch (err) {
       console.error("Error al obtener resumen de caja:", err);
       setResumenData({
@@ -1637,6 +1361,51 @@ export default function PuntoDeVentaView({
   >("RECIBO");
   const [rtnCliente, setRtnCliente] = useState("");
   const [nombreClienteFiscal, setNombreClienteFiscal] = useState("");
+  const TIPO_RECIBO = "RECIBO" as const;
+
+  const guardarReciboActualEnCache = async (nuevaFactura: string) => {
+    const caiCache = await obtenerCaiCache(usuarioActual?.id, TIPO_RECIBO);
+    if (!caiCache) return;
+
+    await guardarCaiCache({
+      ...caiCache,
+      tipo_comprobante: TIPO_RECIBO,
+      factura_actual: nuevaFactura,
+    });
+  };
+
+  const guardarReciboActualEnIdb = async (nuevaFactura: string) => {
+    const caiRows = await getAll<any>(STORE.CAI_FACTURAS);
+    const caiRec = caiRows.find(
+      (row) =>
+        row.cajero_id === usuarioActual?.id &&
+        row.tipo_comprobante === TIPO_RECIBO,
+    );
+    if (!caiRec) return;
+
+    await upsertOne(STORE.CAI_FACTURAS, {
+      ...caiRec,
+      factura_actual: nuevaFactura,
+    });
+  };
+
+  const persistirReciboActual = async (
+    nuevaFactura: string,
+    opciones?: { actualizarSupabase?: boolean },
+  ) => {
+    setFacturaActual(nuevaFactura);
+
+    if (opciones?.actualizarSupabase && usuarioActual?.id) {
+      await supabase
+        .from("cai_facturas")
+        .update({ factura_actual: nuevaFactura })
+        .eq("cajero_id", usuarioActual.id)
+        .eq("tipo_comprobante", TIPO_RECIBO);
+    }
+
+    await guardarReciboActualEnCache(nuevaFactura);
+    await guardarReciboActualEnIdb(nuevaFactura);
+  };
 
   /**
    * Guard síncrono contra doble-submit en el flujo de facturación.
@@ -2061,93 +1830,20 @@ export default function PuntoDeVentaView({
       }
 
       if (aperturaIDB) {
-        const tsAp = new Date(aperturaIDB.fecha ?? 0).getTime();
-        const ventasIDB = await getByIndex<any>(
-          STORE.VENTAS,
-          "cajero_id",
+        const resumenIDB = await calcularResumenTurno(
+          Number(aperturaIDB.id),
           usuarioActual.id,
         );
-        let plat = 0;
-        let beb = 0;
-        for (const v of ventasIDB) {
-          if (v.es_donacion === true) continue;
-          if (v.tipo === "CREDITO") continue;
-          const ts = new Date(v.fecha_hora ?? 0).getTime();
-          if (ts < tsAp) continue;
-          const esDevolucion = v.tipo === "DEVOLUCION";
-          const factor = esDevolucion ? -1 : 1;
-          try {
-            const items =
-              typeof v.productos === "string"
-                ? JSON.parse(v.productos)
-                : v.productos;
-            if (Array.isArray(items)) {
-              for (const item of items) {
-                const qty = parseFloat(item.cantidad || 1);
-                if (item.tipo === "comida") plat += factor * qty;
-                else if (item.tipo === "bebida") beb += factor * qty;
-              }
-            }
-          } catch (_) {}
-        }
-        setPlatillosTurno(Math.max(0, plat));
-        setBebidasTurno(Math.max(0, beb));
-        return;
-      }
 
-      // ── Sin apertura en IDB: intentar Supabase como último recurso ─────────
-      if (estaConectado()) {
-        try {
-          const { data: apertura } = await supabase
-            .from("cierres")
-            .select("fecha")
-            .eq("cajero_id", usuarioActual.id)
-            .eq("estado", "APERTURA")
-            .order("fecha", { ascending: false })
-            .limit(1)
-            .maybeSingle();
-          if (!apertura?.fecha) return;
-
-          const { data: ventas } = await supabase
-            .from("ventas")
-            .select("productos, factura, tipo")
-            .eq("cajero_id", usuarioActual.id)
-            .or("es_donacion.is.null,es_donacion.eq.false")
-            .neq("tipo", "CREDITO")
-            .gte("fecha_hora", apertura.fecha);
-          let plat = 0;
-          let beb = 0;
-          const vistas = new Set<string>();
-          for (const v of ventas || []) {
-            const numFac = String(v.factura || "");
-            const esDevolucion = v.tipo === "DEVOLUCION";
-            if (!esDevolucion) {
-              if (vistas.has(numFac)) continue;
-              vistas.add(numFac);
-            }
-            const factor = esDevolucion ? -1 : 1;
-            try {
-              const items =
-                typeof v.productos === "string"
-                  ? JSON.parse(v.productos)
-                  : v.productos;
-              if (Array.isArray(items)) {
-                for (const item of items) {
-                  const qty = parseFloat(item.cantidad || 1);
-                  if (item.tipo === "comida") plat += factor * qty;
-                  else if (item.tipo === "bebida") beb += factor * qty;
-                }
-              }
-            } catch (_) {}
-          }
-          setPlatillosTurno(Math.max(0, plat));
-          setBebidasTurno(Math.max(0, beb));
-        } catch (_) {
-          console.warn(
-            "[fetchConteoTurno] Supabase offline, usando IDB solamente",
-          );
+        if (resumenIDB) {
+          setPlatillosTurno(Math.max(0, resumenIDB.total_platillos || 0));
+          setBebidasTurno(Math.max(0, resumenIDB.total_bebidas || 0));
+          return;
         }
       }
+
+      setPlatillosTurno(0);
+      setBebidasTurno(0);
     } catch (_) {}
   };
 
@@ -2254,6 +1950,7 @@ export default function PuntoDeVentaView({
             await guardarCaiCache({
               id: caiData.id.toString(),
               cajero_id: caiData.cajero_id,
+              tipo_comprobante: TIPO_RECIBO,
               caja_asignada: caiData.caja_asignada,
               cai: caiData.cai,
               factura_desde: caiData.rango_desde,
@@ -2285,9 +1982,39 @@ export default function PuntoDeVentaView({
 
       // ── Función offline/fallback ──────────────────────────────────────────
       async function cargarDesdeCache() {
-        const caiCache = await obtenerCaiCache(usuarioActual?.id);
+        let caiCache = await obtenerCaiCache(usuarioActual?.id, TIPO_RECIBO);
         if (!caiCache) {
-          console.warn("⚠ No hay CAI en cache");
+          try {
+            const caiRows = await getAll<any>(STORE.CAI_FACTURAS);
+            const caiRecibo = caiRows.find(
+              (row) =>
+                row.cajero_id === usuarioActual?.id &&
+                row.tipo_comprobante === TIPO_RECIBO &&
+                row.activo !== false,
+            );
+
+            if (caiRecibo) {
+              await guardarCaiCache({
+                id: caiRecibo.id.toString(),
+                cajero_id: caiRecibo.cajero_id,
+                tipo_comprobante: TIPO_RECIBO,
+                caja_asignada: caiRecibo.caja_asignada,
+                cai: caiRecibo.cai,
+                factura_desde: caiRecibo.rango_desde,
+                factura_hasta: caiRecibo.rango_hasta,
+                factura_actual:
+                  caiRecibo.factura_actual ?? caiRecibo.rango_desde ?? "1",
+                nombre_cajero: usuarioActual?.nombre ?? "",
+              });
+              caiCache = await obtenerCaiCache(usuarioActual?.id, TIPO_RECIBO);
+            }
+          } catch {
+            /* non-critical */
+          }
+        }
+
+        if (!caiCache) {
+          console.warn("⚠ No hay CAI RECIBO en cache ni en IndexedDB");
           return;
         }
 
@@ -3503,19 +3230,19 @@ export default function PuntoDeVentaView({
             title={
               caiInfo
                 ? `${caiInfo.nombre_cajero} | Caja: ${caiInfo.caja_asignada}${
-                    facturaActual ? ` | Factura: ${facturaActual}` : ""
+                    facturaActual ? ` | Recibo: ${facturaActual}` : ""
                   }`
                 : facturaActual
-                  ? `Factura: ${facturaActual}`
+                  ? `Recibo: ${facturaActual}`
                   : ""
             }
           >
             {caiInfo &&
               `${caiInfo.nombre_cajero} | Caja: ${caiInfo.caja_asignada}`}
             {caiInfo && facturaActual
-              ? ` | Factura: ${facturaActual}`
+              ? ` | Recibo: ${facturaActual}`
               : !caiInfo && facturaActual
-                ? `Factura: ${facturaActual}`
+                ? `Recibo: ${facturaActual}`
                 : ""}
           </span>
           {/* Botones de tema y funciones principales en la misma fila */}
@@ -4297,19 +4024,13 @@ export default function PuntoDeVentaView({
                   const siguienteDisplay = (
                     parseInt(facturaParaEstaVenta) + 1
                   ).toString();
-                  setFacturaActual(siguienteDisplay);
                   try {
-                    const caiCacheRpc = await obtenerCaiCache(
-                      usuarioActual?.id,
+                    await persistirReciboActual(siguienteDisplay);
+                  } catch (err) {
+                    console.error(
+                      "Error actualizando cache de RECIBO tras RPC:",
+                      err,
                     );
-                    if (caiCacheRpc) {
-                      await guardarCaiCache({
-                        ...caiCacheRpc,
-                        factura_actual: siguienteDisplay,
-                      });
-                    }
-                  } catch {
-                    /* non-critical */
                   }
                 } else if (facturaRpc === "LIMITE_ALCANZADO") {
                   setFacturaActual("Límite alcanzado");
@@ -5551,28 +5272,15 @@ export default function PuntoDeVentaView({
                               const siguienteDisplay = (
                                 parseInt(nuevoNum) + 1
                               ).toString();
-                              setFacturaActual(siguienteDisplay);
-                              // Persistir en Supabase para que la próxima sesión empiece desde aquí
                               try {
-                                await supabase
-                                  .from("cai_facturas")
-                                  .update({ factura_actual: siguienteDisplay })
-                                  .eq("cajero_id", usuarioActual?.id ?? "")
-                                  .eq("tipo_comprobante", "RECIBO");
-                              } catch {
-                                /* non-critical */
-                              }
-                              try {
-                                const caiC = await obtenerCaiCache(
-                                  usuarioActual?.id,
+                                await persistirReciboActual(siguienteDisplay, {
+                                  actualizarSupabase: Boolean(usuarioActual?.id),
+                                });
+                              } catch (err) {
+                                console.error(
+                                  "Error corrigiendo factura_actual de RECIBO:",
+                                  err,
                                 );
-                                if (caiC)
-                                  await guardarCaiCache({
-                                    ...caiC,
-                                    factura_actual: siguienteDisplay,
-                                  });
-                              } catch {
-                                /* non-critical */
                               }
                             }
                           } else if (
@@ -5661,66 +5369,16 @@ export default function PuntoDeVentaView({
                   );
                 } else {
                   const nuevaFactura = (numUsado + 1).toString();
-                  setFacturaActual(nuevaFactura);
-
-                  if (!usandoRpc && usuarioActual?.id) {
-                    // Modo offline / fallback: actualizar Supabase manualmente
-                    try {
-                      await supabase
-                        .from("cai_facturas")
-                        .update({ factura_actual: nuevaFactura })
-                        .eq("cajero_id", usuarioActual.id)
-                        .eq("tipo_comprobante", "RECIBO");
-                      console.log(
-                        `[facturar] op=${operationId} → factura_actual actualizada a ${nuevaFactura} en Supabase (sin RPC)`,
-                      );
-                    } catch (err) {
-                      console.error(
-                        "Error actualizando factura_actual en Supabase:",
-                        err,
-                      );
-                    }
-                  }
-
-                  // Actualizar cache offline siempre
                   try {
-                    const caiCache = await obtenerCaiCache(usuarioActual?.id);
-                    if (caiCache) {
-                      await guardarCaiCache({
-                        ...caiCache,
-                        factura_actual: nuevaFactura,
-                      });
-                      console.log(
-                        `[facturar] op=${operationId} → factura_actual actualizada a ${nuevaFactura} en cache`,
-                      );
-                    }
+                    await persistirReciboActual(nuevaFactura, {
+                      actualizarSupabase: !usandoRpc && Boolean(usuarioActual?.id),
+                    });
+                    console.log(
+                      `[facturar] op=${operationId} → factura_actual RECIBO actualizada a ${nuevaFactura}`,
+                    );
                   } catch (err) {
                     console.error(
-                      "Error actualizando factura_actual en cache:",
-                      err,
-                    );
-                  }
-
-                  // Actualizar STORE.CAI_FACTURAS en IDB (fuente primaria offline)
-                  try {
-                    const caiRows = await getAll<any>(STORE.CAI_FACTURAS);
-                    const caiRec = caiRows.find(
-                      (r) =>
-                        r.cajero_id === usuarioActual?.id &&
-                        r.tipo_comprobante === "RECIBO",
-                    );
-                    if (caiRec) {
-                      await upsertOne(STORE.CAI_FACTURAS, {
-                        ...caiRec,
-                        factura_actual: nuevaFactura,
-                      });
-                      console.log(
-                        `[facturar] op=${operationId} → factura_actual=${nuevaFactura} actualizada en STORE.CAI_FACTURAS (IDB)`,
-                      );
-                    }
-                  } catch (err) {
-                    console.error(
-                      "Error actualizando factura_actual en STORE.CAI_FACTURAS:",
+                      "Error actualizando factura_actual de RECIBO:",
                       err,
                     );
                   }

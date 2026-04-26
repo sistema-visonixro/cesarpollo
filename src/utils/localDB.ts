@@ -847,7 +847,7 @@ export async function calcularResumenTurno(
       nombre_cajero: apertura.cajero ?? "",
       caja: apertura.caja ?? "",
       fecha_apertura: apertura.fecha ?? "",
-      fecha_cierre: null,
+      fecha_cierre: cierrePost?.fecha ?? null,
       efectivo_bruto: efectivoBruto,
       efectivo_neto: efectivoNeto,
       cambio_devuelto: cambioTotal,
@@ -886,6 +886,38 @@ export async function getResumenTurno(
     if (cached) return cached;
   }
   return calcularResumenTurno(aperturaId, cajeroId);
+}
+
+export async function listarResumenesTurnos(
+  cajeroId?: string,
+): Promise<ResumenTurno[]> {
+  const cierres = await getAll<any>(STORE.CIERRES);
+  const aperturas = cierres
+    .filter(
+      (c) =>
+        c.estado === "APERTURA" && (!cajeroId || c.cajero_id === cajeroId),
+    )
+    .sort(
+      (a, b) =>
+        new Date(b.fecha ?? 0).getTime() - new Date(a.fecha ?? 0).getTime(),
+    );
+
+  const resumenes = await Promise.all(
+    aperturas.map(async (apertura) => {
+      const aperturaId = Number(apertura.id);
+      if (!Number.isFinite(aperturaId)) return null;
+
+      return calcularResumenTurno(aperturaId, apertura.cajero_id ?? "");
+    }),
+  );
+
+  return resumenes
+    .filter((resumen): resumen is ResumenTurno => Boolean(resumen))
+    .sort(
+      (a, b) =>
+        new Date(b.fecha_apertura ?? 0).getTime() -
+        new Date(a.fecha_apertura ?? 0).getTime(),
+    );
 }
 
 // ─────────────────── Escritura dual (IDB + cola Supabase) ─────────────────

@@ -66,24 +66,10 @@ export default function RegistroCierreView({
     };
   }, [usuarioActual?.id, caja]);
 
-  // Calcular valores automáticos — IDB primero, Supabase como respaldo
+  // Calcular valores automáticos solo desde IndexedDB
   async function obtenerValoresAutomaticos() {
-    // 1. Apertura desde IDB primero
+    // 1. Apertura desde IDB/localStorage cache
     let aperturaActual: any = await getAperturaActiva(usuarioActual?.id ?? "");
-
-    // Fallback Supabase si IDB no tiene la apertura
-    if (!aperturaActual) {
-      const { data } = await supabase
-        .from("cierres")
-        .select("id, fondo_fijo_registrado, fecha, estado")
-        .eq("cajero_id", usuarioActual?.id)
-        .eq("caja", caja)
-        .eq("estado", "APERTURA")
-        .order("fecha", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      aperturaActual = data;
-    }
 
     if (!aperturaActual) {
       setEfectivoSistema(0);
@@ -106,7 +92,7 @@ export default function RegistroCierreView({
       aperturaActual.fondo_fijo_registrado || "0",
     );
 
-    // 2. Calcular resumen desde IDB (sin Supabase)
+    // 2. Calcular resumen desde IDB
     let turnoIDB: any = null;
     try {
       if (aperturaActual.id) {
@@ -117,25 +103,6 @@ export default function RegistroCierreView({
       }
     } catch (e) {
       console.warn("[RegistroCierre] calcularResumenTurno error:", e);
-    }
-
-    // 3. Fallback a v_resumen_turnos en Supabase si IDB no tiene datos
-    if (!turnoIDB && navigator.onLine) {
-      try {
-        const { data } = await supabase
-          .from("v_resumen_turnos")
-          .select(
-            "efectivo_neto, efectivo_bruto, cambio_devuelto, tarjeta, transferencia, dolares_usd, gastos, platillos_vendidos, bebidas_vendidas, platillos_donados, bebidas_donadas, total_platillos, total_bebidas, total_ventas",
-          )
-          .eq("cajero_id", usuarioActual?.id)
-          .eq("caja", caja)
-          .order("fecha_apertura", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        turnoIDB = data;
-      } catch {
-        /* sin conexión */
-      }
     }
 
     const efectivoDia = parseFloat(turnoIDB?.efectivo_neto ?? 0);
