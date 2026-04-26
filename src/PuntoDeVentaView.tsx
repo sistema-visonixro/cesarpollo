@@ -3038,7 +3038,6 @@ export default function PuntoDeVentaView({
       if (!isOnline) {
         const fechaLocal = formatToHondurasLocal();
         const tempId = `offline_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const tempNumId = -Date.now();
         await guardarAperturaCache({
           id: tempId,
           cajero_id: usuarioActual.id,
@@ -3057,23 +3056,7 @@ export default function PuntoDeVentaView({
           estado: "APERTURA",
           pending_sync: true,
         });
-        // También guardar en STORE.CIERRES para que funcionen los cálculos IDB
-        try {
-          await upsertOne(STORE.CIERRES, {
-            id: tempNumId,
-            cajero_id: usuarioActual.id,
-            cajero: usuarioActual.nombre || "",
-            caja: cajaAsignada,
-            fecha: fechaLocal,
-            estado: "APERTURA",
-            pending_sync: true,
-          });
-          console.log(
-            "✓ Apertura offline guardada en STORE.CIERRES (id:",
-            tempNumId,
-            ")",
-          );
-        } catch (_) {}
+        // STORE.CIERRES ya fue actualizado dentro de guardarAperturaCache con pending_sync: true
         console.log(
           "✓ Apertura offline creada localmente (se sincronizará al reconectar)",
         );

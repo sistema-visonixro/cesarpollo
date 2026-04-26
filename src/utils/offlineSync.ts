@@ -1277,7 +1277,10 @@ export async function obtenerAperturasPendientesSync(): Promise<any[]> {
   try {
     const todos = await getAll<any>(STORE.CIERRES);
     return todos.filter(
-      (c) => c?.estado === "APERTURA" && c?.pending_sync === true,
+      (c) =>
+        c?.estado === "APERTURA" &&
+        // Es pendiente si tiene la bandera O si su id es negativo (offline no subido)
+        (c?.pending_sync === true || (typeof c.id === "number" && c.id < 0)),
     );
   } catch (e) {
     console.error("[aperturas] Error obteniendo aperturas pendientes:", e);
@@ -1867,7 +1870,7 @@ export async function guardarAperturaCache(
       );
     } else {
       const numId = parseInt(apertura.id as string);
-      const aperturaIDB = {
+      const aperturaIDB: Record<string, unknown> = {
         id: Number.isFinite(numId) && numId > 0 ? numId : -Date.now(),
         cajero_id: apertura.cajero_id,
         cajero: (apertura as any).cajero || "",
@@ -1875,7 +1878,11 @@ export async function guardarAperturaCache(
         fecha: apertura.fecha,
         estado: "APERTURA",
       };
+      if ((apertura as any).pending_sync !== undefined) {
+        aperturaIDB.pending_sync = (apertura as any).pending_sync;
+      }
       await upsertOne(STORE.CIERRES, aperturaIDB);
+      console.log(`[guardarAperturaCache] Guardado en STORE.CIERRES id=${aperturaIDB.id} pending_sync=${aperturaIDB.pending_sync}`);
     }
   } catch (e) {
     console.warn(
