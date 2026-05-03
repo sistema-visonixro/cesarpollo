@@ -465,6 +465,44 @@ export async function subirVentasPendientesIDB(): Promise<number> {
   return subidas;
 }
 
+/**
+ * Sube a Supabase los gastos guardados offline (id temporal negativo) y
+ * reemplaza el registro local con el id real de Supabase para evitar
+ * duplicados en el resumen de caja.
+ */
+export async function subirGastosPendientesIDB(): Promise<number> {
+  const todos = await getAll<any>(STORE.GASTOS);
+  const pendientes = todos.filter((g) => typeof g.id === "number" && g.id < 0);
+  if (pendientes.length === 0) return 0;
+
+  let subidos = 0;
+  for (const gasto of pendientes) {
+    const { id: _tempId, ...gastoSinId } = gasto;
+    try {
+      const { data: insertado, error } = await supabase
+        .from("gastos")
+        .insert([gastoSinId])
+        .select("id")
+        .single();
+      if (error) {
+        // Si ya existe (conflicto): eliminar el duplicado local
+        if (error.code === "23505" || (error as any).status === 409) {
+          await deleteById(STORE.GASTOS, _tempId);
+        }
+        continue;
+      }
+      if (insertado?.id) {
+        await deleteById(STORE.GASTOS, _tempId);
+        await upsertOne(STORE.GASTOS, { ...gastoSinId, id: insertado.id });
+        subidos++;
+      }
+    } catch (_) {
+      // Sin conexión: se reintentará en el próximo sync
+    }
+  }
+  return subidos;
+}
+
 // ─────────────────────── Cola de escrituras pendientes ─────────────────────
 
 export async function encolarEscritura(
@@ -715,6 +753,15 @@ export async function sincronizarAlApertura(
 export async function sincronizarDiaActual(cajeroId?: string): Promise<void> {
   const hoy = new Date().toISOString().slice(0, 10);
   if (!cajeroId) return;
+
+  // 1. Primero subir gastos pendientes (id negativo) para evitar duplicados
+  try {
+    await subirGastosPendientesIDB();
+  } catch {
+    /* silencioso */
+  }
+
+  // 2. Sincronizar ventas del día desde Supabase
   try {
     const { data } = await supabase
       .from("ventas")
@@ -732,13 +779,31 @@ export async function sincronizarDiaActual(cajeroId?: string): Promise<void> {
   } catch {
     /* silencioso */
   }
+
+  // 3. Sincronizar gastos del día desde Supabase
   try {
     const { data } = await supabase
       .from("gastos")
       .select("*")
       .eq("cajero_id", cajeroId)
       .gte("fecha_hora", hoy);
-    if (data && data.length > 0) await upsertBulk(STORE.GASTOS, data);
+    if (data && data.length > 0) {
+      await upsertBulk(STORE.GASTOS, data);
+    }
+  } catch {
+    /* silencioso */
+  }
+
+  // 4. Limpiar cualquier gasto con id negativo residual del cajero
+  //    (ya fueron subidos o ya existen en Supabase)
+  try {
+    const todosGastos = await getAll<any>(STORE.GASTOS);
+    const negativos = todosGastos.filter(
+      (g) => g.cajero_id === cajeroId && typeof g.id === "number" && g.id < 0,
+    );
+    for (const g of negativos) {
+      await deleteById(STORE.GASTOS, g.id);
+    }
   } catch {
     /* silencioso */
   }
@@ -950,7 +1015,33 @@ export async function calcularResumenTurno(
       "cajero_id",
       cajeroId,
     );
-    const gastosDia = todosLosGastos
+
+    // Deduplicar gastos: si existe un gasto con ID positivo (real de Supabase)
+    // y otro con ID negativo (temporal offline) que tengan mismo monto y
+    // fecha_hora, solo contar el positivo para evitar el doble conteo.
+    const gastosDeduplicados = (() => {
+      const positivos = todosLosGastos.filter((g) => (g.id ?? 0) > 0);
+      const negativos = todosLosGastos.filter((g) => (g.id ?? 0) < 0);
+      // Para cada negativo, verificar si ya existe un positivo equivalente
+      const negativosSinDuplicado = negativos.filter((neg) => {
+        const tsNeg = new Date(neg.fecha_hora ?? neg.fecha ?? 0).getTime();
+        const montoNeg = parseFloat(neg.monto ?? 0);
+        const yaTienePositivo = positivos.some((pos) => {
+          const tsPos = new Date(pos.fecha_hora ?? pos.fecha ?? 0).getTime();
+          const montoPos = parseFloat(pos.monto ?? 0);
+          // Mismo cajero, mismo monto, registrado con diferencia < 10 segundos
+          return (
+            pos.cajero_id === neg.cajero_id &&
+            montoPos === montoNeg &&
+            Math.abs(tsPos - tsNeg) < 10_000
+          );
+        });
+        return !yaTienePositivo;
+      });
+      return [...positivos, ...negativosSinDuplicado];
+    })();
+
+    const gastosDia = gastosDeduplicados
       .filter((g) => {
         const ts = new Date(g.fecha_hora ?? g.fecha ?? 0).getTime();
         return (

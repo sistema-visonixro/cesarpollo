@@ -46,6 +46,7 @@ import {
   calcularResumenTurno,
   getPrecioDolarLocal,
   getUsuariosLocal,
+  sincronizarDiaActual,
 } from "./utils/localDB";
 import { useConexion } from "./utils/useConexion";
 import CreditoClienteModal from "./CreditoClienteModal";
@@ -163,6 +164,7 @@ export default function PuntoDeVentaView({
   const [showCierre, setShowCierre] = useState(false);
   const [showResumen, setShowResumen] = useState(false);
   const [resumenLoading, setResumenLoading] = useState(false);
+  const [resumenSincronizando, setResumenSincronizando] = useState(false);
   const [resumenData, setResumenData] = useState<{
     efectivo: number;
     tarjeta: number;
@@ -553,6 +555,8 @@ export default function PuntoDeVentaView({
     setResumenLoading(true);
     try {
       // ── IDB primero (siempre, sin depender de navigator.onLine) ──────────
+      // La sincronización se hace en background DESPUÉS de mostrar el resumen
+      // para evitar retraso al abrir el modal.
       {
         const cierresIDB = await getByIndex<any>(
           STORE.CIERRES,
@@ -649,6 +653,57 @@ export default function PuntoDeVentaView({
             bebidas_donadas: resumenIDB.bebidas_donadas,
           });
           setResumenLoading(false);
+
+          // Siempre sincronizar con Supabase (en background) cada vez que se abre el resumen
+          if (usuarioActual?.id) {
+            const cajeroIdBg = usuarioActual.id;
+            const aperturaIdBg = aperturaIDB.id;
+            setResumenSincronizando(true);
+            sincronizarDiaActual(cajeroIdBg)
+              .then(() => calcularResumenTurno(aperturaIdBg, cajeroIdBg))
+              .then(async (resumenActualizado) => {
+                if (!resumenActualizado) return;
+                const tasaBg = await getPrecioDolarLocal();
+                const ventasBg = await getByIndex<any>(
+                  STORE.VENTAS,
+                  "cajero_id",
+                  cajeroIdBg,
+                );
+                const tsApBg = new Date(aperturaIDB.fecha ?? 0).getTime();
+                const deliveryBg = ventasBg
+                  .filter((v) => {
+                    const ts = new Date(v.fecha_hora ?? 0).getTime();
+                    return ts >= tsApBg && v.tipo !== "CREDITO";
+                  })
+                  .reduce((acc, v) => acc + parseFloat(v.delivery || 0), 0);
+                setResumenData({
+                  efectivo: Number(
+                    (
+                      resumenActualizado.efectivo_bruto -
+                      resumenActualizado.cambio_devuelto
+                    ).toFixed(2),
+                  ),
+                  tarjeta: resumenActualizado.tarjeta,
+                  transferencia: resumenActualizado.transferencia,
+                  dolares: resumenActualizado.dolares_lps,
+                  dolares_usd: resumenActualizado.dolares_usd,
+                  dolares_convertidos: Number(
+                    (resumenActualizado.dolares_usd * tasaBg).toFixed(2),
+                  ),
+                  tasa_dolar: tasaBg,
+                  gastos: resumenActualizado.gastos,
+                  cambio: resumenActualizado.cambio_devuelto,
+                  delivery: deliveryBg,
+                  platillos: resumenActualizado.platillos_vendidos,
+                  bebidas: resumenActualizado.bebidas_vendidas,
+                  platillos_donados: resumenActualizado.platillos_donados,
+                  bebidas_donadas: resumenActualizado.bebidas_donadas,
+                });
+              })
+              .catch(() => { /* sin conexión: se muestran datos de IDB */ })
+              .finally(() => setResumenSincronizando(false));
+          }
+
           return;
         }
         setResumenLoading(false);
@@ -3839,7 +3894,25 @@ export default function PuntoDeVentaView({
                     marginTop: 2,
                   }}
                 >
-                  Resumen del turno actual
+                  {resumenSincronizando ? (
+                    <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span
+                        style={{
+                          display: "inline-block",
+                          width: 10,
+                          height: 10,
+                          borderRadius: "50%",
+                          border: "2px solid rgba(255,255,255,0.4)",
+                          borderTopColor: "#fff",
+                          animation: "spin 0.8s linear infinite",
+                        }}
+                      />
+                      Sincronizando...
+                      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+                    </span>
+                  ) : (
+                    "Resumen del turno actual"
+                  )}
                 </div>
               </div>
               <button
@@ -6144,7 +6217,7 @@ export default function PuntoDeVentaView({
           style={{
             flex: 2,
             minWidth: 0,
-            order: 2,
+            order: 1,
             background: theme === "lite" ? "#fff" : "#232526",
             borderRadius: 18,
             boxShadow:
@@ -6539,7 +6612,7 @@ export default function PuntoDeVentaView({
         <div
           style={{
             flex: 1,
-            order: 1,
+            order: 2,
             minWidth: 300,
             background: theme === "lite" ? "#e6eef6" : "#263238",
             borderRadius: 16,
