@@ -2895,6 +2895,157 @@ export default function ResultadosView({
             flex: 0 0 50%;
             text-align: left;
           }
+
+          .financial-top-banner {
+            margin-bottom: 16px !important;
+            border-radius: 12px !important;
+          }
+
+          .financial-top-header {
+            padding: 16px !important;
+            flex-direction: column !important;
+            align-items: flex-start !important;
+            gap: 12px !important;
+          }
+
+          .financial-top-title {
+            font-size: 22px !important;
+            letter-spacing: 0.3px !important;
+            line-height: 1.2 !important;
+          }
+
+          .financial-top-subtitle {
+            font-size: 12px !important;
+          }
+
+          .financial-top-total-wrap {
+            width: 100% !important;
+            text-align: left !important;
+          }
+
+          .financial-top-total {
+            font-size: 26px !important;
+            line-height: 1.2 !important;
+            word-break: break-word;
+          }
+
+          .financial-top-stats-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+          }
+
+          .financial-filter-panel {
+            padding: 14px !important;
+            margin-bottom: 16px !important;
+            border-radius: 10px !important;
+          }
+
+          .financial-filter-grid {
+            grid-template-columns: 1fr !important;
+            gap: 10px !important;
+            margin-bottom: 12px !important;
+          }
+
+          .financial-filter-actions {
+            grid-template-columns: 1fr 1fr !important;
+          }
+
+          .cash-summary-section {
+            margin: 16px 0 14px !important;
+            border-radius: 12px !important;
+          }
+
+          .cash-summary-header {
+            padding: 14px !important;
+            flex-direction: column !important;
+            align-items: stretch !important;
+            gap: 12px !important;
+            border-radius: 12px 12px 0 0 !important;
+          }
+
+          .cash-summary-title-wrap {
+            width: 100% !important;
+            gap: 10px !important;
+          }
+
+          .cash-summary-title {
+            font-size: 18px !important;
+            letter-spacing: 0.2px !important;
+          }
+
+          .cash-summary-subtitle {
+            font-size: 11px !important;
+          }
+
+          .cash-summary-refresh-btn {
+            width: 100% !important;
+            justify-content: center;
+            padding: 10px 12px !important;
+          }
+
+          .cash-summary-grid {
+            grid-template-columns: 1fr !important;
+            gap: 12px !important;
+            padding: 12px !important;
+            min-height: 140px !important;
+          }
+
+          .cash-turno-card {
+            border-radius: 12px !important;
+          }
+
+          .cash-turno-card-header {
+            padding: 12px !important;
+          }
+
+          .cash-turno-card-body {
+            padding: 12px !important;
+          }
+
+          .cash-turno-schedule-grid,
+          .cash-turno-main-grid,
+          .cash-turno-methods-grid,
+          .cash-turno-products-grid {
+            grid-template-columns: 1fr !important;
+            gap: 10px !important;
+          }
+        }
+
+        @media (max-width: 480px) {
+          .main-content {
+            padding: 0.7rem !important;
+          }
+
+          .financial-top-header {
+            padding: 14px !important;
+          }
+
+          .financial-top-title {
+            font-size: 19px !important;
+          }
+
+          .financial-top-total {
+            font-size: 22px !important;
+          }
+
+          .financial-top-stats-grid {
+            grid-template-columns: 1fr !important;
+          }
+
+          .financial-filter-actions {
+            grid-template-columns: 1fr !important;
+          }
+
+          .cash-summary-title {
+            font-size: 16px !important;
+          }
+
+          .cash-summary-subtitle {
+            font-size: 10px !important;
+          }
+
+          .cash-summary-grid {
+            padding: 10px !important;
+          }
         }
       `}</style>
 
@@ -2912,6 +3063,7 @@ export default function ResultadosView({
       <main className="main-content" style={{ background: "#f0f4f8" }}>
         {/* BANNER SUPERIOR - Stats Principales */}
         <div
+          className="financial-top-banner"
           style={{
             marginBottom: "24px",
             borderRadius: "14px",
@@ -2921,6 +3073,7 @@ export default function ResultadosView({
         >
           {/* Header Stats */}
           <div
+            className="financial-top-header"
             style={{
               background: "linear-gradient(135deg, #0b4f9a 0%, #1976d2 100%)",
               color: "#fff",
@@ -2932,6 +3085,7 @@ export default function ResultadosView({
           >
             <div>
               <h2
+                className="financial-top-title"
                 style={{
                   margin: "0 0 8px 0",
                   fontSize: "28px",
@@ -2942,6 +3096,7 @@ export default function ResultadosView({
                 📊 Dashboard Financiero
               </h2>
               <p
+                className="financial-top-subtitle"
                 style={{
                   margin: 0,
                   fontSize: "13px",
@@ -2955,11 +3110,13 @@ export default function ResultadosView({
               </p>
             </div>
             <div
+              className="financial-top-total-wrap"
               style={{
                 textAlign: "right",
               }}
             >
               <div
+                className="financial-top-total"
                 style={{
                   fontSize: "32px",
                   fontWeight: 900,
@@ -2979,6 +3136,7 @@ export default function ResultadosView({
 
           {/* Stats Grid */}
           <div
+            className="financial-top-stats-grid"
             style={{
               background: "#fff",
               display: "grid",
@@ -3099,6 +3257,7 @@ export default function ResultadosView({
 
         {/* FILTROS COMPACTOS - Diseño minimalista */}
         <div
+          className="financial-filter-panel"
           style={{
             marginBottom: "24px",
             background: "#fff",
@@ -3109,6 +3268,7 @@ export default function ResultadosView({
           }}
         >
           <div
+            className="financial-filter-grid"
             style={{
               display: "grid",
               gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
@@ -3219,6 +3379,7 @@ export default function ResultadosView({
 
           {/* Botones de acción */}
           <div
+            className="financial-filter-actions"
             style={{
               display: "grid",
               gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
@@ -3353,6 +3514,7 @@ export default function ResultadosView({
 
         {/* Turnos activos desde v_resumen_turnos */}
         <div
+          className="cash-summary-section"
           style={{
             margin: "20px 0 16px",
             background: "#ffffff",
@@ -3364,6 +3526,7 @@ export default function ResultadosView({
         >
           {/* Header */}
           <div
+            className="cash-summary-header"
             style={{
               display: "flex",
               alignItems: "center",
@@ -3374,10 +3537,14 @@ export default function ResultadosView({
               marginBottom: 0,
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div
+              className="cash-summary-title-wrap"
+              style={{ display: "flex", alignItems: "center", gap: 12 }}
+            >
               <span style={{ fontSize: 28 }}>🏦</span>
               <div>
                 <div
+                  className="cash-summary-title"
                   style={{
                     fontWeight: 900,
                     fontSize: 22,
@@ -3387,13 +3554,17 @@ export default function ResultadosView({
                 >
                   Resumen de Caja
                 </div>
-                <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)" }}>
+                <div
+                  className="cash-summary-subtitle"
+                  style={{ fontSize: 12, color: "rgba(255,255,255,0.8)" }}
+                >
                   Turnos completados y activos
                 </div>
               </div>
             </div>
             <button
               onClick={fetchTurnosResumen}
+              className="cash-summary-refresh-btn"
               style={{
                 fontSize: 13,
                 padding: "10px 18px",
@@ -3424,6 +3595,7 @@ export default function ResultadosView({
 
           {/* Grid de Cards */}
           <div
+            className="cash-summary-grid"
             style={{
               display: "grid",
               gridTemplateColumns: "repeat(auto-fill, minmax(380px, 1fr))",
@@ -3480,6 +3652,7 @@ export default function ResultadosView({
                 return (
                   <div
                     key={t.apertura_id}
+                    className="cash-turno-card"
                     style={{
                       background: "#fff",
                       borderRadius: "14px",
@@ -3505,6 +3678,7 @@ export default function ResultadosView({
                   >
                     {/* Card Header */}
                     <div
+                      className="cash-turno-card-header"
                       style={{
                         background: estaAbierto
                           ? "linear-gradient(135deg, #22c55e 0%, #16a34a 100%)"
@@ -3601,7 +3775,7 @@ export default function ResultadosView({
                     </div>
 
                     {/* Card Body */}
-                    <div style={{ padding: "16px" }}>
+                    <div className="cash-turno-card-body" style={{ padding: "16px" }}>
                       {/* Fechas */}
                       <div
                         style={{
@@ -3623,6 +3797,7 @@ export default function ResultadosView({
                           Horario
                         </div>
                         <div
+                          className="cash-turno-schedule-grid"
                           style={{
                             display: "grid",
                             gridTemplateColumns: "1fr 1fr",
@@ -3673,6 +3848,7 @@ export default function ResultadosView({
 
                       {/* Montos Principales */}
                       <div
+                        className="cash-turno-main-grid"
                         style={{
                           display: "grid",
                           gridTemplateColumns: "1fr 1fr",
@@ -3770,6 +3946,7 @@ export default function ResultadosView({
                           Métodos de Pago
                         </div>
                         <div
+                          className="cash-turno-methods-grid"
                           style={{
                             display: "grid",
                             gridTemplateColumns: "1fr 1fr 1fr",
@@ -3847,6 +4024,7 @@ export default function ResultadosView({
 
                       {/* Productos y Gastos */}
                       <div
+                        className="cash-turno-products-grid"
                         style={{
                           display: "grid",
                           gridTemplateColumns: "1fr 1fr 1fr",
