@@ -2572,6 +2572,12 @@ export default function ResultadosView({
       ? facturasSorted[facturasSorted.length - 1]?.factura
       : null;
 
+  const turnosActivos = turnosResumen.filter(
+    (turno) =>
+      !turno.fecha_cierre ||
+      new Date(turno.fecha_cierre) > new Date(Date.now() + 60000),
+  );
+
   return (
     <div
       className="resultados-enterprise"
@@ -3558,7 +3564,7 @@ export default function ResultadosView({
                   className="cash-summary-subtitle"
                   style={{ fontSize: 12, color: "rgba(255,255,255,0.8)" }}
                 >
-                  Turnos completados y activos
+                  Solo turnos activos
                 </div>
               </div>
             </div>
@@ -3603,7 +3609,7 @@ export default function ResultadosView({
               padding: "20px",
               background: "#f8fafc",
               borderRadius: "0 0 12px 12px",
-              minHeight: turnosResumen.length === 0 ? "200px" : "auto",
+              minHeight: turnosActivos.length === 0 ? "200px" : "auto",
             }}
           >
             {turnosLoading ? (
@@ -3618,7 +3624,7 @@ export default function ResultadosView({
                 <div style={{ fontSize: "32px", marginBottom: "12px" }}>⏳</div>
                 <div>Cargando turnos...</div>
               </div>
-            ) : turnosResumen.length === 0 ? (
+            ) : turnosActivos.length === 0 ? (
               <div
                 style={{
                   gridColumn: "1 / -1",
@@ -3628,10 +3634,10 @@ export default function ResultadosView({
                 }}
               >
                 <div style={{ fontSize: "32px", marginBottom: "12px" }}>📭</div>
-                <div>Sin turnos registrados</div>
+                <div>No hay turnos activos</div>
               </div>
             ) : (
-              turnosResumen.map((t) => {
+              turnosActivos.map((t) => {
                 const estaAbierto =
                   !t.fecha_cierre ||
                   new Date(t.fecha_cierre) > new Date(Date.now() + 60000);
