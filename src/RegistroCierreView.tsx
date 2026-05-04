@@ -6,15 +6,16 @@ import {
 } from "./utils/fechas";
 import { useDatosNegocio } from "./useDatosNegocio";
 import {
-  calcularResumenTurno,
   getAperturaActiva,
   upsertOne,
   getAll,
   STORE,
-  getPrecioDolarLocal,
   sincronizarDiaActual,
+  subirVentasPendientesIDB,
+  subirGastosPendientesIDB,
 } from "./utils/localDB";
 import {
+  sincronizarTodo,
   limpiarAperturaCache,
   limpiarAperturaLocalStorage,
 } from "./utils/offlineSync";
@@ -57,8 +58,23 @@ export default function RegistroCierreView({
   const [ultimaSync, setUltimaSync] = useState<Date | null>(null);
   const [syncError, setSyncError] = useState("");
   const [guardando, setGuardando] = useState(false);
+  const [pantallaCarga, setPantallaCarga] = useState(false);
   const [fechaAperturaSistema, setFechaAperturaSistema] = useState<string>("");
   const [precioDolarActual, setPrecioDolarActual] = useState(0);
+
+  async function obtenerPrecioDolarSupabase(): Promise<number> {
+    try {
+      const { data } = await supabase
+        .from("precio_dolar")
+        .select("valor")
+        .eq("id", "singleton")
+        .limit(1)
+        .maybeSingle();
+      return Number(data?.valor ?? 0);
+    } catch {
+      return 0;
+    }
+  }
 
   // Cargar valores del sistema al montar la vista
   useEffect(() => {
@@ -66,35 +82,54 @@ export default function RegistroCierreView({
     async function cargarResumen() {
       if (!usuarioActual || !usuarioActual.id || !caja) return;
       setLoading(true);
+      setPantallaCarga(true);
+      setSincronizando(true);
       setSyncError("");
-      try {
-        // Primero sincronizar ventas y gastos del día desde Supabase
-        if (navigator.onLine) {
-          setSincronizando(true);
-          try {
-            await sincronizarDiaActual(usuarioActual.id);
-            setUltimaSync(new Date());
-          } catch (syncErr) {
-            console.warn(
-              "[CierreCaja] No se pudo sincronizar con servidor:",
-              syncErr,
-            );
-            setSyncError(
-              "No se pudo conectar al servidor. Los datos pueden ser del caché local.",
-            );
-          } finally {
-            setSincronizando(false);
-          }
-        } else {
-          setSyncError("Sin conexión. Mostrando datos del caché local.");
+      const inicioCarga = Date.now();
+
+      const esperarCargaMinima = async () => {
+        const faltante = 5000 - (Date.now() - inicioCarga);
+        if (faltante > 0) {
+          await new Promise((resolve) => setTimeout(resolve, faltante));
         }
+      };
+
+      try {
+        if (!navigator.onLine) {
+          throw new Error(
+            "Sin conexión. El cierre de caja ahora se carga solo con datos de Supabase.",
+          );
+        }
+
+        await Promise.allSettled([
+          sincronizarTodo(),
+          sincronizarDiaActual(usuarioActual.id),
+          subirVentasPendientesIDB(),
+          subirGastosPendientesIDB(),
+        ]);
+
         await obtenerValoresAutomaticos();
-        const tasa = await getPrecioDolarLocal();
-        setPrecioDolarActual(Number(tasa) || 0);
+        const tasa = await obtenerPrecioDolarSupabase();
+        if (mounted) {
+          setPrecioDolarActual(Number(tasa) || 0);
+          setUltimaSync(new Date());
+        }
       } catch (err) {
         console.error("Error cargando resumen:", err);
+        if (mounted) {
+          setSyncError(
+            err instanceof Error
+              ? err.message
+              : "No se pudo cargar el resumen desde Supabase.",
+          );
+        }
       } finally {
-        if (mounted) setLoading(false);
+        await esperarCargaMinima();
+        if (mounted) {
+          setSincronizando(false);
+          setPantallaCarga(false);
+          setLoading(false);
+        }
       }
     }
     cargarResumen();
@@ -103,16 +138,16 @@ export default function RegistroCierreView({
     };
   }, [usuarioActual?.id, caja]);
 
-  // Calcular valores automáticos solo desde IndexedDB
+  // Calcular valores automáticos solo desde Supabase
   async function obtenerValoresAutomaticos() {
-    // 1. Apertura desde IDB/localStorage cache
-    let aperturaActual: any = await getAperturaActiva(usuarioActual?.id ?? "");
-
-    if (!aperturaActual) {
+    const cajeroId = usuarioActual?.id ?? "";
+    if (!cajeroId) {
       setEfectivoSistema(0);
       setTarjetaSistema(0);
       setTransferenciasSistema(0);
       setDolaresSistema(0);
+      setGastosSistema(0);
+      setTotalVentasSistema(0);
       setFechaAperturaSistema("");
       return {
         fondoFijoDia: 0,
@@ -123,61 +158,137 @@ export default function RegistroCierreView({
         gastosDia: 0,
         platillosDia: 0,
         bebidasDia: 0,
+        totalVentasDia: 0,
+        fechaApertura: "",
       };
     }
 
-    const fondoFijoDia = parseFloat(
-      aperturaActual.fondo_fijo_registrado || "0",
-    );
+    const sumar = (arr: any[], campo: string) =>
+      arr.reduce((acc, row) => acc + parseFloat(row?.[campo] ?? 0), 0);
 
-    // 2. Calcular resumen desde IDB
-    let turnoIDB: any = null;
-    try {
-      if (aperturaActual.id) {
-        turnoIDB = await calcularResumenTurno(
-          Number(aperturaActual.id),
-          usuarioActual?.id ?? "",
-        );
-      }
-    } catch (e) {
-      console.warn("[RegistroCierre] calcularResumenTurno error:", e);
+    const contarTipo = (arr: any[], tipo: string) => {
+      let count = 0;
+      arr.forEach((v) => {
+        const factor = v.tipo === "DEVOLUCION" ? -1 : 1;
+        try {
+          const prods: any[] =
+            typeof v.productos === "string"
+              ? JSON.parse(v.productos)
+              : (v.productos ?? []);
+          prods.forEach((p) => {
+            if ((p.tipo ?? "").toLowerCase() === tipo.toLowerCase()) {
+              count += factor * parseInt(p.cantidad ?? p.qty ?? 1);
+            }
+          });
+        } catch {
+          /* ignorar */
+        }
+      });
+      return count;
+    };
+
+    const { data: aperturaActual, error: aperturaError } = await supabase
+      .from("cierres")
+      .select("id, caja, fecha, fecha_apertura, fondo_fijo_registrado")
+      .eq("cajero_id", cajeroId)
+      .eq("caja", caja)
+      .eq("estado", "APERTURA")
+      .order("id", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (aperturaError) throw aperturaError;
+
+    if (!aperturaActual) {
+      setEfectivoSistema(0);
+      setTarjetaSistema(0);
+      setTransferenciasSistema(0);
+      setDolaresSistema(0);
+      setGastosSistema(0);
+      setTotalVentasSistema(0);
+      setFechaAperturaSistema("");
+      return {
+        fondoFijoDia: 0,
+        efectivoDia: 0,
+        tarjetaDia: 0,
+        transferenciasDia: 0,
+        dolaresDia: 0,
+        gastosDia: 0,
+        platillosDia: 0,
+        bebidasDia: 0,
+        totalVentasDia: 0,
+        fechaApertura: "",
+      };
     }
 
-    const efectivoDia = parseFloat(turnoIDB?.efectivo_neto ?? 0);
-    const tarjetaDia = parseFloat(turnoIDB?.tarjeta ?? 0);
-    const transferenciasDia = parseFloat(
-      turnoIDB?.transferencia ?? turnoIDB?.transferencia ?? 0,
-    );
-    const dolaresDia = parseFloat(turnoIDB?.dolares_usd ?? 0);
-    const gastosDia = parseFloat(turnoIDB?.gastos ?? 0);
-    const platillosDia = parseFloat(
-      turnoIDB?.total_platillos ?? turnoIDB?.platillos_vendidos ?? 0,
-    );
-    const bebidasDia = parseFloat(
-      turnoIDB?.total_bebidas ?? turnoIDB?.bebidas_vendidas ?? 0,
-    );
-    const totalVentasDia = parseFloat(turnoIDB?.total_ventas ?? 0);
+    const fechaApertura = aperturaActual.fecha_apertura ?? aperturaActual.fecha;
+    const tsApertura = new Date(fechaApertura ?? 0).getTime();
+    const fondoFijoDia = parseFloat(aperturaActual.fondo_fijo_registrado ?? 0);
 
-    setEfectivoSistema(efectivoDia);
-    setTarjetaSistema(tarjetaDia);
-    setTransferenciasSistema(transferenciasDia);
-    setDolaresSistema(dolaresDia);
-    setGastosSistema(gastosDia);
-    setTotalVentasSistema(totalVentasDia ?? 0);
-    const fa = aperturaActual.fecha_apertura ?? aperturaActual.fecha ?? "";
-    setFechaAperturaSistema(fa);
+    const [ventasRes, gastosRes] = await Promise.all([
+      supabase
+        .from("ventas")
+        .select(
+          "efectivo, tarjeta, transferencia, dolares_usd, cambio, total, tipo, es_donacion, productos, fecha_hora",
+        )
+        .eq("cajero_id", cajeroId)
+        .gte("fecha_hora", fechaApertura)
+        .order("fecha_hora", { ascending: false }),
+      supabase
+        .from("gastos")
+        .select("monto, caja, fecha_hora, fecha")
+        .eq("cajero_id", cajeroId)
+        .gte("fecha_hora", fechaApertura),
+    ]);
+
+    if (ventasRes.error) throw ventasRes.error;
+    if (gastosRes.error) throw gastosRes.error;
+
+    const ventasTurno = (ventasRes.data ?? []).filter((v: any) => {
+      const ts = new Date(v.fecha_hora ?? 0).getTime();
+      return ts >= tsApertura && v.tipo !== "CREDITO";
+    });
+    const ventasNormales = ventasTurno.filter((v: any) => v.es_donacion !== true);
+
+    const gastosTurno = (gastosRes.data ?? []).filter((g: any) => {
+      const ts = new Date(g.fecha_hora ?? g.fecha ?? 0).getTime();
+      return ts >= tsApertura && (g.caja === caja || !g.caja);
+    });
+
+    const efectivoBruto = sumar(ventasNormales, "efectivo");
+    const cambioDia = sumar(ventasNormales, "cambio");
+    const gastosDia = gastosTurno.reduce(
+      (acc: number, g: any) => acc + parseFloat(g.monto ?? 0),
+      0,
+    );
+
+    const efectivoDia = efectivoBruto - cambioDia - gastosDia;
+    const tarjetaDia = sumar(ventasNormales, "tarjeta");
+    const transferenciasDia = sumar(ventasNormales, "transferencia");
+    const dolaresDia = sumar(ventasNormales, "dolares_usd");
+    const platillosDia = contarTipo(ventasNormales, "comida");
+    const bebidasDia = contarTipo(ventasNormales, "bebida");
+    const totalVentasDia = sumar(ventasNormales, "total");
+
+    setEfectivoSistema(Number(efectivoDia.toFixed(2)));
+    setTarjetaSistema(Number(tarjetaDia.toFixed(2)));
+    setTransferenciasSistema(Number(transferenciasDia.toFixed(2)));
+    setDolaresSistema(Number(dolaresDia.toFixed(2)));
+    setGastosSistema(Number(gastosDia.toFixed(2)));
+    setTotalVentasSistema(Number(totalVentasDia.toFixed(2)));
+    setFechaAperturaSistema(fechaApertura ?? "");
 
     return {
-      fondoFijoDia,
-      efectivoDia,
-      tarjetaDia,
-      transferenciasDia,
-      dolaresDia,
-      gastosDia,
+      fondoFijoDia: Number(fondoFijoDia.toFixed(2)),
+      efectivoDia: Number(efectivoDia.toFixed(2)),
+      tarjetaDia: Number(tarjetaDia.toFixed(2)),
+      transferenciasDia: Number(transferenciasDia.toFixed(2)),
+      dolaresDia: Number(dolaresDia.toFixed(2)),
+      gastosDia: Number(gastosDia.toFixed(2)),
       platillosDia,
       bebidasDia,
-      totalVentasDia,
-      fechaApertura: aperturaActual.fecha_apertura ?? aperturaActual.fecha,
+      totalVentasDia: Number(totalVentasDia.toFixed(2)),
+      fechaApertura: fechaApertura ?? "",
     };
   }
 
@@ -339,8 +450,8 @@ export default function RegistroCierreView({
       const dolaresRegistrado =
         dolares && parseFloat(dolares) > 0 ? parseFloat(dolares) : 0;
 
-      // Obtener precio del dólar desde IDB (siempre disponible offline)
-      const precioDolar = await getPrecioDolarLocal();
+      // Obtener precio del dólar desde Supabase
+      const precioDolar = await obtenerPrecioDolarSupabase();
 
       // Calcular diferencia de dólares en Lempiras
       const diferenciaDolaresUSD = dolaresRegistrado - dolaresDia;
@@ -734,11 +845,63 @@ export default function RegistroCierreView({
     >
       <style>{`
         @keyframes spin { 0%{transform:rotate(0deg)} 100%{transform:rotate(360deg)} }
+        @keyframes cloudPulse { 0%,100% { transform: translateY(0); opacity: .9; } 50% { transform: translateY(-4px); opacity: 1; } }
         .ci-input:focus { border-color: #2563eb !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.13) !important; background: #fff !important; }
         .ci-sync:hover:not(:disabled) { background: #e2e8f0 !important; border-color: #94a3b8 !important; }
         .ci-guardar:hover:not(:disabled) { background: #1d4ed8 !important; transform: translateY(-1px); box-shadow: 0 6px 18px rgba(37,99,235,0.32) !important; }
         .ci-cancelar:hover { border-color: #94a3b8 !important; background: #f1f5f9 !important; color: #334155 !important; }
       `}</style>
+      {pantallaCarga && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.62)",
+            zIndex: 200000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 20,
+          }}
+        >
+          <div
+            style={{
+              background: "#fff",
+              borderRadius: 16,
+              minWidth: 300,
+              maxWidth: 380,
+              width: "100%",
+              padding: "24px 20px",
+              textAlign: "center",
+              boxShadow: "0 20px 45px rgba(0,0,0,0.25)",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 54,
+                lineHeight: 1,
+                marginBottom: 10,
+                animation: "cloudPulse 1.1s ease-in-out infinite",
+              }}
+            >
+              ☁️
+            </div>
+            <div
+              style={{
+                fontSize: 17,
+                fontWeight: 800,
+                color: "#0f172a",
+                marginBottom: 6,
+              }}
+            >
+              Descargando datos desde la nube
+            </div>
+            <div style={{ fontSize: 13, color: "#64748b" }}>
+              Sincronizando ventas, pedidos, gastos y devoluciones...
+            </div>
+          </div>
+        </div>
+      )}
       <form
         onSubmit={handleGuardar}
         style={{
@@ -894,19 +1057,40 @@ export default function RegistroCierreView({
               disabled={sincronizando || loading}
               onClick={async () => {
                 if (!usuarioActual?.id) return;
+                const inicioCarga = Date.now();
+                const esperarCargaMinima = async () => {
+                  const faltante = 5000 - (Date.now() - inicioCarga);
+                  if (faltante > 0) {
+                    await new Promise((resolve) => setTimeout(resolve, faltante));
+                  }
+                };
+
                 setSincronizando(true);
+                setPantallaCarga(true);
                 setSyncError("");
                 setLoading(true);
                 try {
-                  await sincronizarDiaActual(usuarioActual.id);
+                  if (!navigator.onLine) {
+                    throw new Error(
+                      "Sin conexión. El cierre de caja ahora se carga solo con Supabase.",
+                    );
+                  }
+                  await Promise.allSettled([
+                    sincronizarTodo(),
+                    sincronizarDiaActual(usuarioActual.id),
+                    subirVentasPendientesIDB(),
+                    subirGastosPendientesIDB(),
+                  ]);
                   setUltimaSync(new Date());
                   await obtenerValoresAutomaticos();
-                  const tasa = await getPrecioDolarLocal();
+                  const tasa = await obtenerPrecioDolarSupabase();
                   setPrecioDolarActual(Number(tasa) || 0);
-                } catch (e) {
-                  setSyncError("Error al sincronizar.");
+                } catch (e: any) {
+                  setSyncError(e?.message || "Error al sincronizar.");
                 } finally {
+                  await esperarCargaMinima();
                   setSincronizando(false);
+                  setPantallaCarga(false);
                   setLoading(false);
                 }
               }}

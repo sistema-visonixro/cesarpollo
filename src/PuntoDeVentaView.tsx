@@ -47,6 +47,8 @@ import {
   getPrecioDolarLocal,
   getUsuariosLocal,
   sincronizarDiaActual,
+  subirVentasPendientesIDB,
+  subirGastosPendientesIDB,
 } from "./utils/localDB";
 import { useConexion } from "./utils/useConexion";
 import CreditoClienteModal from "./CreditoClienteModal";
@@ -553,166 +555,149 @@ export default function PuntoDeVentaView({
   async function fetchResumenCaja() {
     setShowResumen(true);
     setResumenLoading(true);
-    try {
-      // ── IDB primero (siempre, sin depender de navigator.onLine) ──────────
-      // La sincronización se hace en background DESPUÉS de mostrar el resumen
-      // para evitar retraso al abrir el modal.
-      {
-        const cierresIDB = await getByIndex<any>(
-          STORE.CIERRES,
-          "cajero_id",
-          usuarioActual?.id,
-        );
-        let aperturaIDB: any =
-          cierresIDB
-            .filter((c) => c.estado === "APERTURA")
-            .sort(
-              (a, b) =>
-                new Date(b.fecha ?? 0).getTime() -
-                new Date(a.fecha ?? 0).getTime(),
-            )[0] ?? null;
+    setResumenSincronizando(true);
+    const cargaInicio = Date.now();
 
-        // Fallback: buscar en localStorage / apertura_cache y sincronizar en STORE.CIERRES
-        if (!aperturaIDB) {
-          const lsAp = obtenerAperturaLocalStorage();
-          const cachedAp =
-            lsAp?.cajero_id === usuarioActual?.id
-              ? lsAp
-              : await obtenerAperturaCache()
-                  .then((c) => (c?.cajero_id === usuarioActual?.id ? c : null))
-                  .catch(() => null);
-          if (cachedAp) {
-            const numId =
-              parseInt(cachedAp.id as string) > 0
-                ? parseInt(cachedAp.id as string)
-                : -Date.now();
-            aperturaIDB = {
-              id: numId,
-              cajero_id: cachedAp.cajero_id,
-              cajero: (cachedAp as any).cajero || "",
-              caja: cachedAp.caja,
-              fecha: cachedAp.fecha,
-              estado: "APERTURA",
-            };
-            await upsertOne(STORE.CIERRES, aperturaIDB);
-            console.log(
-              "✓ Apertura rescatada de cache y guardada en STORE.CIERRES",
-            );
-          }
-        }
-
-        if (aperturaIDB) {
-          const resumenIDB = await calcularResumenTurno(
-            aperturaIDB.id,
-            usuarioActual!.id,
-          );
-          if (!resumenIDB) {
-            setResumenLoading(false);
-            alert("No se pudo calcular el resumen desde IDB.");
-            setShowResumen(false);
-            return;
-          }
-
-          const tasa = await getPrecioDolarLocal();
-          const dolaresConvertidos = Number(
-            (resumenIDB.dolares_usd * tasa).toFixed(2),
-          );
-
-          // Calcular delivery desde IDB
-          const ventasIDB = await getByIndex<any>(
-            STORE.VENTAS,
-            "cajero_id",
-            usuarioActual!.id,
-          );
-          const tsAp = new Date(aperturaIDB.fecha ?? 0).getTime();
-          const deliverySum = ventasIDB
-            .filter((v) => {
-              const ts = new Date(v.fecha_hora ?? 0).getTime();
-              return ts >= tsAp && v.tipo !== "CREDITO";
-            })
-            .reduce((acc, v) => acc + parseFloat(v.delivery || 0), 0);
-
-          setResumenData({
-            efectivo: Number(
-              (resumenIDB.efectivo_bruto - resumenIDB.cambio_devuelto).toFixed(
-                2,
-              ),
-            ),
-            tarjeta: resumenIDB.tarjeta,
-            transferencia: resumenIDB.transferencia,
-            dolares: resumenIDB.dolares_lps,
-            dolares_usd: resumenIDB.dolares_usd,
-            dolares_convertidos: dolaresConvertidos,
-            tasa_dolar: tasa,
-            gastos: resumenIDB.gastos,
-            cambio: resumenIDB.cambio_devuelto,
-            delivery: deliverySum,
-            platillos: resumenIDB.platillos_vendidos,
-            bebidas: resumenIDB.bebidas_vendidas,
-            platillos_donados: resumenIDB.platillos_donados,
-            bebidas_donadas: resumenIDB.bebidas_donadas,
-          });
-          setResumenLoading(false);
-
-          // Siempre sincronizar con Supabase (en background) cada vez que se abre el resumen
-          if (usuarioActual?.id) {
-            const cajeroIdBg = usuarioActual.id;
-            const aperturaIdBg = aperturaIDB.id;
-            setResumenSincronizando(true);
-            sincronizarDiaActual(cajeroIdBg)
-              .then(() => calcularResumenTurno(aperturaIdBg, cajeroIdBg))
-              .then(async (resumenActualizado) => {
-                if (!resumenActualizado) return;
-                const tasaBg = await getPrecioDolarLocal();
-                const ventasBg = await getByIndex<any>(
-                  STORE.VENTAS,
-                  "cajero_id",
-                  cajeroIdBg,
-                );
-                const tsApBg = new Date(aperturaIDB.fecha ?? 0).getTime();
-                const deliveryBg = ventasBg
-                  .filter((v) => {
-                    const ts = new Date(v.fecha_hora ?? 0).getTime();
-                    return ts >= tsApBg && v.tipo !== "CREDITO";
-                  })
-                  .reduce((acc, v) => acc + parseFloat(v.delivery || 0), 0);
-                setResumenData({
-                  efectivo: Number(
-                    (
-                      resumenActualizado.efectivo_bruto -
-                      resumenActualizado.cambio_devuelto
-                    ).toFixed(2),
-                  ),
-                  tarjeta: resumenActualizado.tarjeta,
-                  transferencia: resumenActualizado.transferencia,
-                  dolares: resumenActualizado.dolares_lps,
-                  dolares_usd: resumenActualizado.dolares_usd,
-                  dolares_convertidos: Number(
-                    (resumenActualizado.dolares_usd * tasaBg).toFixed(2),
-                  ),
-                  tasa_dolar: tasaBg,
-                  gastos: resumenActualizado.gastos,
-                  cambio: resumenActualizado.cambio_devuelto,
-                  delivery: deliveryBg,
-                  platillos: resumenActualizado.platillos_vendidos,
-                  bebidas: resumenActualizado.bebidas_vendidas,
-                  platillos_donados: resumenActualizado.platillos_donados,
-                  bebidas_donadas: resumenActualizado.bebidas_donadas,
-                });
-              })
-              .catch(() => { /* sin conexión: se muestran datos de IDB */ })
-              .finally(() => setResumenSincronizando(false));
-          }
-
-          return;
-        }
-        setResumenLoading(false);
-        alert(
-          "No hay apertura de caja en IndexedDB. El resumen de caja se calcula solo desde datos locales.",
-        );
-        setShowResumen(false);
-        return;
+    const esperarCargaMinima = async () => {
+      const faltante = 5000 - (Date.now() - cargaInicio);
+      if (faltante > 0) {
+        await new Promise((resolve) => setTimeout(resolve, faltante));
       }
+    };
+
+    const sumar = (arr: any[], campo: string) =>
+      arr.reduce((acc, row) => acc + parseFloat(row?.[campo] ?? 0), 0);
+
+    const contarTipo = (arr: any[], tipo: string) => {
+      let count = 0;
+      arr.forEach((v) => {
+        const factor = v.tipo === "DEVOLUCION" ? -1 : 1;
+        try {
+          const prods: any[] =
+            typeof v.productos === "string"
+              ? JSON.parse(v.productos)
+              : (v.productos ?? []);
+          prods.forEach((p) => {
+            if ((p.tipo ?? "").toLowerCase() === tipo.toLowerCase()) {
+              count += factor * parseInt(p.cantidad ?? p.qty ?? 1);
+            }
+          });
+        } catch {
+          /* ignorar */
+        }
+      });
+      return count;
+    };
+
+    try {
+      if (!usuarioActual?.id) {
+        throw new Error("No hay usuario activo para consultar el resumen.");
+      }
+
+      if (!navigator.onLine) {
+        throw new Error(
+          "Sin conexión. El resumen de caja ahora se obtiene solo desde Supabase.",
+        );
+      }
+
+      await Promise.allSettled([
+        sincronizarTodo(),
+        sincronizarDiaActual(usuarioActual.id),
+        subirVentasPendientesIDB(),
+        subirGastosPendientesIDB(),
+      ]);
+
+      const { data: aperturaActual, error: aperturaError } = await supabase
+        .from("cierres")
+        .select("id, caja, fecha, fecha_apertura")
+        .eq("cajero_id", usuarioActual.id)
+        .eq("estado", "APERTURA")
+        .order("id", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (aperturaError) throw aperturaError;
+      if (!aperturaActual) {
+        throw new Error("No hay apertura activa en Supabase para este cajero.");
+      }
+
+      const fechaApertura = aperturaActual.fecha_apertura ?? aperturaActual.fecha;
+      const tsApertura = new Date(fechaApertura ?? 0).getTime();
+
+      const [ventasRes, gastosRes, precioDolarRes] = await Promise.all([
+        supabase
+          .from("ventas")
+          .select(
+            "efectivo, tarjeta, transferencia, dolares, dolares_usd, cambio, delivery, productos, tipo, es_donacion, total, fecha_hora",
+          )
+          .eq("cajero_id", usuarioActual.id)
+          .gte("fecha_hora", fechaApertura)
+          .order("fecha_hora", { ascending: false }),
+        supabase
+          .from("gastos")
+          .select("monto, caja, fecha_hora, fecha")
+          .eq("cajero_id", usuarioActual.id)
+          .gte("fecha_hora", fechaApertura),
+        supabase
+          .from("precio_dolar")
+          .select("valor")
+          .eq("id", "singleton")
+          .limit(1)
+          .maybeSingle(),
+      ]);
+
+      if (ventasRes.error) throw ventasRes.error;
+      if (gastosRes.error) throw gastosRes.error;
+
+      const ventasTurno = (ventasRes.data ?? []).filter((v: any) => {
+        const ts = new Date(v.fecha_hora ?? 0).getTime();
+        return ts >= tsApertura && v.tipo !== "CREDITO";
+      });
+      const ventasNormales = ventasTurno.filter((v: any) => v.es_donacion !== true);
+      const donaciones = ventasTurno.filter((v: any) => v.es_donacion === true);
+
+      const gastosTurno = (gastosRes.data ?? []).filter((g: any) => {
+        const ts = new Date(g.fecha_hora ?? g.fecha ?? 0).getTime();
+        return (
+          ts >= tsApertura &&
+          (g.caja === aperturaActual.caja || !g.caja || !aperturaActual.caja)
+        );
+      });
+
+      const efectivoBruto = sumar(ventasNormales, "efectivo");
+      const cambioTotal = sumar(ventasNormales, "cambio");
+      const gastosTotal = gastosTurno.reduce(
+        (acc: number, g: any) => acc + parseFloat(g.monto ?? 0),
+        0,
+      );
+      const tarjetaTotal = sumar(ventasNormales, "tarjeta");
+      const transferenciaTotal = sumar(ventasNormales, "transferencia");
+      const dolaresLpsTotal = sumar(ventasNormales, "dolares");
+      const dolaresUsdTotal = sumar(ventasNormales, "dolares_usd");
+      const deliveryTotal = sumar(ventasNormales, "delivery");
+      const platillosVendidos = contarTipo(ventasNormales, "comida");
+      const bebidasVendidas = contarTipo(ventasNormales, "bebida");
+      const platillosDonados = contarTipo(donaciones, "comida");
+      const bebidasDonadas = contarTipo(donaciones, "bebida");
+
+      const tasaDolar = Number(precioDolarRes.data?.valor ?? 0);
+
+      setResumenData({
+        efectivo: Number((efectivoBruto - cambioTotal).toFixed(2)),
+        tarjeta: Number(tarjetaTotal.toFixed(2)),
+        transferencia: Number(transferenciaTotal.toFixed(2)),
+        dolares: Number(dolaresLpsTotal.toFixed(2)),
+        dolares_usd: Number(dolaresUsdTotal.toFixed(2)),
+        dolares_convertidos: Number((dolaresUsdTotal * tasaDolar).toFixed(2)),
+        tasa_dolar: tasaDolar,
+        gastos: Number(gastosTotal.toFixed(2)),
+        cambio: Number(cambioTotal.toFixed(2)),
+        delivery: Number(deliveryTotal.toFixed(2)),
+        platillos: platillosVendidos,
+        bebidas: bebidasVendidas,
+        platillos_donados: platillosDonados,
+        bebidas_donadas: bebidasDonadas,
+      });
     } catch (err) {
       console.error("Error al obtener resumen de caja:", err);
       setResumenData({
@@ -722,8 +707,16 @@ export default function PuntoDeVentaView({
         dolares: 0,
         gastos: 0,
       });
+      setShowResumen(false);
+      alert(
+        err instanceof Error
+          ? err.message
+          : "No se pudo cargar el resumen de caja desde Supabase.",
+      );
     } finally {
+      await esperarCargaMinima();
       setResumenLoading(false);
+      setResumenSincronizando(false);
     }
   }
 
@@ -3936,13 +3929,29 @@ export default function PuntoDeVentaView({
             {resumenLoading ? (
               <div
                 style={{
-                  padding: 40,
+                  padding: "42px 24px",
                   textAlign: "center",
                   color: "#1976d2",
                   fontSize: 16,
                 }}
               >
-                Cargando...
+                <style>{`@keyframes cloudPulse { 0%,100% { transform: translateY(0); opacity: .9; } 50% { transform: translateY(-4px); opacity: 1; } }`}</style>
+                <div
+                  style={{
+                    fontSize: 48,
+                    lineHeight: 1,
+                    marginBottom: 12,
+                    animation: "cloudPulse 1.1s ease-in-out infinite",
+                  }}
+                >
+                  ☁️
+                </div>
+                <div style={{ fontWeight: 800, marginBottom: 4 }}>
+                  Descargando datos desde la nube...
+                </div>
+                <div style={{ fontSize: 13, color: "#64748b" }}>
+                  Sincronizando ventas, pedidos, gastos y devoluciones
+                </div>
               </div>
             ) : resumenData ? (
               <div style={{ padding: "clamp(12px,3.5vw,20px)" }}>
